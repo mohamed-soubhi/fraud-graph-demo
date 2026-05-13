@@ -1,6 +1,6 @@
 # Architecture — Fraud Graph Demo
 
-End-to-end fraud detection system using Neo4j knowledge graph, GDS algorithms, and LLM-powered natural language querying.
+End-to-end fraud detection system using Neo4j knowledge graph, GDS algorithms, GraphSAGE GNN, and LLM-powered natural language querying.
 
 ---
 
@@ -14,10 +14,11 @@ graph TB
     end
 
     subgraph Docker["Docker Compose"]
-        subgraph App["fraud-app container\nPython 3.11"]
+        subgraph App["fraud-app container\nPython 3.11 · PyTorch · PyG"]
             ING["ingest.py\nCSV → Graph"]
             FR["fraud_rules.py\nCypher Rules"]
             GDS["gds_analysis.py\nGDS Algorithms"]
+            GNN["gnn_train.py\nGraphSAGE GNN"]
             CH["chat.py\nNL → Cypher"]
             BM["benchmark.py\nPerformance Tests"]
         end
@@ -31,6 +32,8 @@ graph TB
     ING -->|Bolt 7687| DB
     FR -->|Bolt 7687| DB
     GDS -->|Bolt 7687| DB
+    GNN -->|read features| DB
+    GNN -->|WRITE fraudProb| DB
     CH -->|Bolt 7687| DB
     BM -->|Bolt 7687| DB
     CH -->|HTTPS| OL
@@ -49,6 +52,9 @@ flowchart LR
     D -->|SET flags| C
     C --> E["gds_analysis.py\n5 GDS algorithms"]
     E -->|WRITE properties| C
+    C --> G["gnn_train.py\nGraphSAGE · 150 epochs"]
+    G -->|READ pageRank,betweenness\nflagVelocity,flagMule,flagDrain| C
+    G -->|WRITE fraudProb| C
     C --> F["chat.py\nNL query interface"]
     F -->|Cypher| C
     C -->|results| F
@@ -109,6 +115,48 @@ flowchart TD
     BC  -->|"WRITE betweenness"| OUT
     CD  -->|"WRITE triangleCount"| OUT
 ```
+
+---
+
+## GNN Pipeline — GraphSAGE
+
+```mermaid
+flowchart TD
+    subgraph Input["Input — from Neo4j after GDS"]
+        F1["pageRank\n(normalised)"]
+        F2["betweenness\n(normalised)"]
+        F3["wccComponent\n(normalised)"]
+        F4["flagVelocity\n0 or 1"]
+        F5["flagMule\n0 or 1"]
+        F6["flagDrain\n0 or 1"]
+    end
+
+    subgraph Model["GraphSAGE Model (3-layer)"]
+        L1["SAGEConv(6→64)\n+ ReLU + Dropout(0.3)"]
+        L2["SAGEConv(64→64)\n+ ReLU + Dropout(0.3)"]
+        L3["SAGEConv(64→2)\nlogits"]
+        SIG["sigmoid\n→ fraudProb ∈ 0,1"]
+        L1 --> L2 --> L3 --> SIG
+    end
+
+    subgraph Training["Training"]
+        LOSS["Weighted CrossEntropy\npos_weight ≈ 74×"]
+        ADAM["Adam · lr=0.005\nweight_decay=5e-4"]
+        SPLIT["Train 60% · Val 20% · Test 20%\nBest model by val AUC"]
+    end
+
+    subgraph Output["Output"]
+        EVAL["Metrics: Precision · Recall · F1 · AUC-ROC"]
+        COMP["Comparison: Rules vs GNN vs Ensemble"]
+        WRITE["fraudProb → SET a.fraudProb\non all Account nodes"]
+    end
+
+    Input --> Model
+    Model --> Training
+    Training --> Output
+```
+
+**Layer behaviour:** Each SAGEConv aggregates features from 1-hop neighbours (mean aggregation), concatenates with the node's own features, and applies a linear transform. After 3 layers, each node's representation encodes its 3-hop neighbourhood — enough to capture the full mule chain structure (A→B→C→cashout).
 
 ---
 
@@ -214,6 +262,10 @@ fraud-graph-demo/
 | PageRank | `maxIterations=5` | Converges in 2 iterations on this graph; higher wastes compute |
 | Ingest | MERGE not CREATE | Idempotent — safe to re-run; entrypoint skips if DB already populated |
 | Cycle detection | Cypher 2+3-hop instead of GDS triangleCount | GDS triangleCount requires UNDIRECTED projection; money flows are directed |
+| GNN model | GraphSAGE over GCN | GraphSAGE is inductive — new accounts scored without retraining; GCN is transductive |
+| GNN features | GDS properties + rule flags | Combines structural signals (pageRank, betweenness) with rule-based signals in one feature vector |
+| GNN loss | Weighted cross-entropy (pos_weight ≈ 74×) | PaySim fraud rate ~1.3% — without weighting the model ignores the minority class |
+| GNN epochs | 150 with best-val-AUC checkpoint | Prevents overfitting; fraud graphs have noisy labels (simulation artefacts) |
 
 ---
 
@@ -242,6 +294,28 @@ Exact betweenness requires computing shortest paths between **all pairs of nodes
 ### Why Cypher Cycle Detection instead of GDS triangleCount?
 
 GDS triangle counting requires an UNDIRECTED projection because triangles are symmetric (A-B-C-A is the same as A-C-B-A in an undirected graph). Our Account→Account projection is **directed** — money flows from sender to receiver, not both ways. Projecting as UNDIRECTED would lose the directional information needed to distinguish genuine circular flows from coincidental return payments. Cypher pattern matching on the directed graph is slower (~115ms) but semantically correct.
+
+### Why GraphSAGE for Fraud Node Classification?
+
+**Rules vs GDS vs GNN — three complementary layers:**
+
+| Layer | Mechanism | Catches | Misses |
+|-------|-----------|---------|--------|
+| Fraud rules (Cypher) | Pattern matching | Known fraud patterns (velocity, mule, drain) | Novel patterns, structural guilt-by-association |
+| GDS algorithms | Graph topology metrics | Structural roles (hubs, bridges, rings) | Can't label fraud directly — unsupervised |
+| GraphSAGE (GNN) | Learned neighbourhood aggregation | Complex patterns + structural context + known signals together | Patterns outside training distribution |
+
+**Why neighbourhood aggregation matters:**  
+A "clean" account (no rule flags, moderate PageRank) that consistently routes money from high-velocity senders to high-drain receivers is structurally suspicious. Rules won't fire. GDS metrics will be moderate. But GraphSAGE, aggregating across 3 hops, sees that its neighbourhood is saturated with fraud signals — and scores it high.
+
+**Why 3 layers / 3 hops?**  
+A typical mule chain is 3–4 hops: origin → mule → aggregator → cashout. 3 SAGEConv layers means each node's embedding incorporates information from all accounts within 3 transaction steps — exactly the range needed to see the full layering structure.
+
+**Inductive vs transductive:**  
+GCN (Graph Convolutional Network) learns fixed embeddings for each node — it cannot score new nodes without retraining. GraphSAGE learns an *aggregation function* (mean of neighbour features + linear transform). When a new account joins the graph, its embedding is computed on-the-fly from its neighbours' existing features. This is essential for production fraud detection where new accounts appear constantly.
+
+**Class imbalance strategy:**  
+PaySim fraud rate ≈ 1.3% (1 fraud in 74 legitimate accounts). Without correction, the model achieves 98.7% accuracy by predicting "clean" for everything. Weighted cross-entropy assigns `pos_weight = 74` to fraud samples — each fraud example counts as much as 74 clean examples in the loss gradient. This forces the model to learn fraud-discriminative features rather than the majority class distribution.
 
 ### Graph Projection Design
 

@@ -11,6 +11,40 @@ End-to-end fraud detection knowledge graph demonstrating graph engineering and A
 ![spaCy](https://img.shields.io/badge/spaCy_NER-09A3D5?style=for-the-badge&logo=spacy&logoColor=white)
 ![Kaggle](https://img.shields.io/badge/PaySim-Kaggle-20BEFF?style=for-the-badge&logo=kaggle&logoColor=white)
 
+## Quick Start
+
+> Full walkthrough in [Step-by-Step Setup](#step-by-step-setup). This is the TL;DR.
+
+```bash
+# 1 — clone and configure
+git clone https://github.com/mohamed-soubhi/fraud-graph-demo.git
+cd fraud-graph-demo
+cp .env.example .env          # set OLLAMA_API_KEY and NEO4J_PASSWORD
+
+# 2 — download PaySim CSV from Kaggle → place in data/
+#     https://www.kaggle.com/datasets/ealaxi/paysim1
+
+# 3 — start containers (Neo4j + app)
+docker compose up -d --build  # first build ~5–8 min (PyTorch layer)
+docker compose ps             # wait until both show "healthy"
+
+# 4 — run full pipeline (ingest → rules → GDS → GNN)
+docker compose exec app python app/run_all.py
+#   [1/5] ingest     ~2 min   50k transactions → Neo4j
+#   [2/5] rules      ~5s      velocity · mule chain · balance drain
+#   [3/5] GDS        ~5s      Louvain · PageRank · WCC · Betweenness · Cycle
+#   [4/5] GNN        ~3 min   GraphSAGE 150 epochs → fraudProb on every account
+#   [5/5] verify     ~5s      9 smoke-test checks
+
+# 5 — open Neo4j Browser:  http://localhost:7474
+# 6 — start NL chat
+docker compose exec app python app/chat.py
+```
+
+**Expected total time:** ~6 minutes on first run (Docker build) · ~5 minutes on subsequent runs
+
+---
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -509,7 +543,7 @@ Runs all steps in sequence: ingest → fraud rules → GDS → GNN → verify (9
 
 ## Manual Test Cases
 
-Run all queries in Neo4j Browser (http://localhost:7474) after completing Steps 4–6.
+Run all queries in Neo4j Browser (http://localhost:7474) after completing Steps 4–7.
 
 ---
 
@@ -717,6 +751,60 @@ ORDER BY betweenness DESC LIMIT 10
 
 ---
 
+### TC-13 — GNN: fraudProb written to all accounts
+
+```cypher
+MATCH (a:Account)
+WHERE a.fraudProb IS NOT NULL
+RETURN count(a) AS accounts_scored,
+       round(min(a.fraudProb), 4)  AS min_prob,
+       round(avg(a.fraudProb), 4)  AS avg_prob,
+       round(max(a.fraudProb), 4)  AS max_prob
+```
+
+**Expect:** `accounts_scored` equals total Account count — every node has a `fraudProb` score
+
+---
+
+### TC-14 — GNN: high-risk accounts above threshold
+
+```cypher
+MATCH (a:Account)
+WHERE a.fraudProb > 0.8
+RETURN a.id                                       AS account,
+       round(a.fraudProb, 4)                      AS fraudProb,
+       round(a.pageRank,  3)                       AS pageRank,
+       a.community                                 AS community,
+       CASE WHEN a.flagVelocity THEN 'velocity ' ELSE '' END +
+       CASE WHEN a.flagMule     THEN 'mule '     ELSE '' END +
+       CASE WHEN a.flagDrain    THEN 'drain'      ELSE '' END AS ruleFlags
+ORDER BY fraudProb DESC LIMIT 20
+```
+
+**Expect:** Accounts with `fraudProb > 0.8` — many will also carry rule flags (confirms GNN aligns with rule-based detection). Some will have no flags (GNN catches structurally embedded accounts that rules miss).
+
+---
+
+### TC-15 — GNN vs rules: accounts GNN finds that rules missed
+
+```cypher
+MATCH (a:Account)
+WHERE a.fraudProb > 0.7
+  AND NOT (a.flagVelocity OR a.flagMule OR a.flagDrain)
+RETURN a.id             AS account,
+       round(a.fraudProb, 4) AS fraudProb,
+       round(a.pageRank, 3)  AS pageRank,
+       a.community           AS community,
+       a.wccComponent        AS wcc_ring
+ORDER BY fraudProb DESC LIMIT 15
+```
+
+**Expect:** Accounts with high GNN score but no rule flags — these are "clean-looking" accounts structurally embedded in fraud rings. High `fraudProb` driven by neighborhood features (pageRank, community density, wcc isolation), not rule triggers.
+
+> **Talking point:** "Rules catch known patterns. The GNN surfaces unknown accomplices — accounts that look clean in isolation but are deeply embedded in the fraud network topology."
+
+---
+
 ## Stopping and Cleanup
 
 ```bash
@@ -741,14 +829,15 @@ fraud-graph-demo/
 ├── architecture.drawio       ← draw.io visual diagram
 │
 ├── app/
-│   ├── Dockerfile            ← python:3.11-slim + spaCy model
+│   ├── Dockerfile            ← python:3.11-slim + PyTorch CPU + PyG + spaCy
 │   ├── entrypoint.sh         ← auto-ingest on container start
 │   ├── requirements.txt
 │   ├── ingest.py             ← PaySim CSV → Neo4j (MERGE, idempotent)
 │   ├── fraud_rules.py        ← 3 Cypher fraud rules (velocity/mule/drain)
 │   ├── gds_analysis.py       ← 5 GDS algorithms + Cypher cycle detection
+│   ├── gnn_train.py          ← GraphSAGE 3-layer · fraudProb → Neo4j
 │   ├── chat.py               ← spaCy NER + LangChain + Ollama NL→Cypher
-│   ├── run_all.py            ← full pipeline smoke test (8 checks)
+│   ├── run_all.py            ← full pipeline smoke test (9 checks)
 │   └── benchmark.py          ← timing benchmark → benchmark_report.md
 │
 └── data/
@@ -766,3 +855,7 @@ fraud-graph-demo/
 | Ollama auth error | Verify `OLLAMA_API_KEY` in `.env` |
 | CSV not found | Check file is in `data/` with exact filename from Kaggle |
 | Out of memory | Reduce `LOAD_LIMIT` in `.env` (default 50000) |
+| `gnn_train.py` — `ModuleNotFoundError: torch_geometric` | Rebuild image: `docker compose build --no-cache app` |
+| `gnn_train.py` — `GNN fraudProb written: FAIL` | Run `gds_analysis.py` first — GNN needs GDS properties as features |
+| GNN training very slow | Expected on CPU — 150 epochs on 78k nodes takes ~2–3 min. Reduce `EPOCHS` in `gnn_train.py` to 50 for a quick test |
+| `fraudProb` all near 0 or 1 | Re-run after `gds_analysis.py` — if GDS properties are missing, features collapse to flag columns only |
