@@ -11,6 +11,8 @@ End-to-end fraud detection knowledge graph demonstrating graph engineering and A
 ![spaCy](https://img.shields.io/badge/spaCy_NER-09A3D5?style=for-the-badge&logo=spacy&logoColor=white)
 ![Kaggle](https://img.shields.io/badge/PaySim-Kaggle-20BEFF?style=for-the-badge&logo=kaggle&logoColor=white)
 
+![Fraud Graph Banner](fraud-graph-banner.png)
+
 ## Quick Start
 
 > Full walkthrough in [Step-by-Step Setup](#step-by-step-setup). This is the TL;DR.
