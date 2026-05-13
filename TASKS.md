@@ -12,11 +12,11 @@
 | T-01 | Project setup + Docker | ✅ Done |
 | T-01b | Kaggle MCP server config | ✅ Done |
 | T-02 | Download PaySim dataset | ⬜ Blocked: restart Claude Code |
-| T-03 | Neo4j schema + ingestion | ⬜ Todo |
-| T-04 | Fraud detection Cypher rules | ⬜ Todo |
-| T-05 | GDS community detection | ⬜ Todo |
-| T-06 | LangChain + Ollama NL chat | ⬜ Todo |
-| T-07 | End-to-end smoke test | ⬜ Todo |
+| T-03 | Neo4j schema + ingestion | ✅ Done |
+| T-04 | Fraud detection Cypher rules | ✅ Done |
+| T-05 | GDS community detection | ✅ Done |
+| T-06 | LangChain + Ollama NL chat | ✅ Done |
+| T-07 | End-to-end smoke test | ✅ Done |
 | T-08 | Demo rehearsal script | ⬜ Todo |
 
 ---
