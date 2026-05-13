@@ -162,13 +162,19 @@ def main():
     print("OVERALL:", "ALL PASS" if all_pass else "FAILURES DETECTED")
     print(f"\nLog saved → {log_path}")
 
-    # restore stdout/stderr before exit so atexit handlers work cleanly
+    # restore stdout/stderr before launching interactive chat
     tee = sys.stdout
     sys.stdout = tee._stream
     sys.stderr = tee._stream
     tee.close()
 
-    sys.exit(0 if all_pass else 1)
+    if all_pass:
+        print("\nPipeline complete — launching chat interface...\n")
+        import chat
+        chat.chat_loop()
+        sys.exit(0)
+    else:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
