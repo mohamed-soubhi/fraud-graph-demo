@@ -1,5 +1,10 @@
-"""End-to-end smoke test — runs full pipeline and reports pass/fail."""
+"""End-to-end smoke test — runs full pipeline and reports pass/fail.
+
+Output is mirrored to logs/run_YYYY-MM-DD_HH-MM-SS.log for evidence.
+"""
 import os, sys
+from datetime import datetime
+from pathlib import Path
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
 
@@ -11,6 +16,43 @@ PASSWORD = os.environ["NEO4J_PASSWORD"]
 
 CHECKS = []
 
+# ── logging setup ────────────────────────────────────────────────────────────
+
+class _Tee:
+    """Write to both the original stream and a log file simultaneously."""
+    def __init__(self, stream, log_path: Path):
+        self._stream = stream
+        self._file   = log_path.open("a", buffering=1)
+
+    def write(self, data):
+        self._stream.write(data)
+        self._file.write(data)
+
+    def flush(self):
+        self._stream.flush()
+        self._file.flush()
+
+    def close(self):
+        self._file.close()
+
+    # forward everything else (isatty, fileno, etc.)
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def setup_logging() -> Path:
+    log_dir = Path("/app/logs")
+    log_dir.mkdir(exist_ok=True)
+    stamp    = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_path = log_dir / f"run_{stamp}.log"
+
+    tee = _Tee(sys.stdout, log_path)
+    sys.stdout = tee
+    sys.stderr = tee          # capture sub-module prints & warnings too
+    return log_path
+
+
+# ── checks ───────────────────────────────────────────────────────────────────
 
 def check(label, fn):
     try:
@@ -21,8 +63,13 @@ def check(label, fn):
         CHECKS.append((label, "FAIL", str(e)))
 
 
+# ── main ─────────────────────────────────────────────────────────────────────
+
 def main():
-    print("Running full pipeline smoke test...\n")
+    log_path = setup_logging()
+
+    header = f"{'='*60}\nFRAUD GRAPH DEMO — PIPELINE RUN\n{datetime.now().isoformat()}\nLog: {log_path}\n{'='*60}\n"
+    print(header)
 
     print("[1/5] Ingesting data...")
     import ingest
@@ -101,9 +148,9 @@ def main():
         )
     driver.close()
 
-    print("\n" + "=" * 50)
+    print("\n" + "=" * 60)
     print("SMOKE TEST RESULTS")
-    print("=" * 50)
+    print("=" * 60)
     all_pass = True
     for label, status, detail in CHECKS:
         icon = "✓" if status == "PASS" else "✗"
@@ -111,8 +158,16 @@ def main():
         if status == "FAIL":
             all_pass = False
 
-    print("=" * 50)
+    print("=" * 60)
     print("OVERALL:", "ALL PASS" if all_pass else "FAILURES DETECTED")
+    print(f"\nLog saved → {log_path}")
+
+    # restore stdout/stderr before exit so atexit handlers work cleanly
+    tee = sys.stdout
+    sys.stdout = tee._stream
+    sys.stderr = tee._stream
+    tee.close()
+
     sys.exit(0 if all_pass else 1)
 
 
