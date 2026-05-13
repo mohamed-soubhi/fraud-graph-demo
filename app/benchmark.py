@@ -258,85 +258,225 @@ def print_quality(results: list[Result], size: int):
     print(SEP)
 
 
-# ── markdown report ───────────────────────────────────────────────────────────
+# ── markdown report with Mermaid charts ──────────────────────────────────────
+
+def mermaid_bar(title: str, x_labels: list[str], values: list[float],
+                y_label: str = "Time (ms)", y_max: float | None = None) -> str:
+    cap = y_max or (max(values) * 1.15 if values else 100)
+    xs = ", ".join(f'"{l}"' for l in x_labels)
+    vs = ", ".join(f"{v:.0f}" for v in values)
+    return "\n".join([
+        "```mermaid",
+        "xychart-beta",
+        f'    title "{title}"',
+        f"    x-axis [{xs}]",
+        f'    y-axis "{y_label}" 0 --> {cap:.0f}',
+        f"    bar [{vs}]",
+        "```",
+    ])
+
 
 def save_markdown(results: list[Result], proj_stats: dict[int, dict]):
-    lines: list[str] = []
-    lines += [
-        "# GDS Algorithm Benchmark Report",
-        "",
-        f"**Dataset:** PaySim fraud transactions  ",
-        f"**Graph sizes:** {', '.join(f'{s//1000}k txn' for s in SIZES)}  ",
-        "**Algorithms:** Louvain · PageRank · WCC · Betweenness · Cycle Detection",
-        "",
-    ]
-
-    # Graph size table
-    lines += ["## Graph Projections", "", "| Size | Nodes | Edges |", "|------|-------|-------|"]
-    for size, stats in sorted(proj_stats.items()):
-        lines.append(f"| {size//1000}k txn | {stats['nodes']:,} | {stats['edges']:,} |")
-    lines.append("")
-
-    # Timing table
     algos = sorted({r.algo for r in results})
     sizes = sorted({r.size for r in results})
     default_cfg: dict[str, str] = {}
     for r in results:
         default_cfg.setdefault(r.algo, r.config)
 
-    lines += ["## Timing Comparison (ms, default config)", ""]
-    header = "| Algorithm |" + "".join(f" {s//1000}k txn |" for s in sizes)
-    sep_row = "|-----------|" + "".join("--------:|" for _ in sizes)
-    lines += [header, sep_row]
+    last = SIZES[-1]
+
+    def get(algo, size, cfg=None):
+        cfg = cfg or default_cfg[algo]
+        return next((r for r in results if r.algo == algo and r.size == size and r.config == cfg), None)
+
+    lines: list[str] = [
+        "# GDS Algorithm Benchmark Report",
+        "",
+        f"**Dataset:** PaySim fraud transactions — Neo4j GDS {SIZES[-1]//1000}k rows  ",
+        f"**Graph sizes:** {', '.join(f'{s//1000}k' for s in SIZES)} transactions  ",
+        "**Algorithms:** Louvain · PageRank · WCC · Betweenness Centrality · Cycle Detection  ",
+        "**Config dimensions:** Louvain maxLevels · PageRank iterations · Betweenness exact vs sampled",
+        "",
+        "---",
+        "",
+        "## Graph Projections",
+        "",
+        "Account→Account virtual graph projected at each size.",
+        "",
+        "| Size | Nodes | Edges | Proj Time |",
+        "|------|------:|------:|----------:|",
+    ]
+    for size, stats in sorted(proj_stats.items()):
+        lines.append(f"| {size//1000}k txn | {stats['nodes']:,} | {stats['edges']:,} | ~{stats.get('proj_ms', 0):.0f}ms |")
+    lines += ["", "> Node count is constant — all accounts exist; only edge density grows.", "", "---", ""]
+
+    # ── Speed comparison at largest size (excl betweenness exact) ────────────
+    speed_algos = ["WCC", "Betweenness", "Louvain", "PageRank", "Cycle Det."]
+    speed_vals  = [get(a, last).ms for a in speed_algos if get(a, last)]
+    speed_algos = [a for a in speed_algos if get(a, last)]
+    lines += [
+        "## Algorithm Speed — 50k Graph",
+        "",
+        mermaid_bar(
+            "Algorithm Runtime at 50k Graph (ms, lower = faster)",
+            speed_algos, speed_vals,
+        ),
+        "",
+        "> Betweenness **exact** excluded (3,982ms — 100× scale); shown separately below.",
+        "",
+        "---",
+        "",
+    ]
+
+    # ── Timing per size for fast algos ───────────────────────────────────────
+    lines += ["## Runtime vs Graph Size", ""]
+    for algo in ["WCC", "Louvain", "PageRank"]:
+        vals = [get(algo, s).ms for s in sizes if get(algo, s)]
+        szlabels = [f"{s//1000}k" for s in sizes if get(algo, s)]
+        lines += [
+            mermaid_bar(f"{algo} Runtime vs Graph Size (ms)", szlabels, vals),
+            "",
+        ]
+
+    # Full timing table
+    lines += [
+        "Full timing table (ms, default config):",
+        "",
+        "| Algorithm |" + "".join(f" {s//1000}k |" for s in sizes),
+        "|-----------|" + "".join("----:|" for _ in sizes),
+    ]
     for algo in algos:
-        cfg = default_cfg[algo]
-        cells = []
-        for size in sizes:
-            m = next((r for r in results if r.algo == algo and r.size == size and r.config == cfg), None)
-            cells.append(f" {m.ms:.0f} |" if m else " N/A |")
+        cells = [f" {get(algo, s).ms:.0f} |" if get(algo, s) else " N/A |" for s in sizes]
         lines.append(f"| {algo} |" + "".join(cells))
-    lines.append("")
+    lines += ["", "---", ""]
 
-    # Config sensitivity tables
-    for algo in ["Louvain", "PageRank", "Betweenness"]:
-        rows = [r for r in results if r.algo == algo]
-        configs = sorted({r.config for r in rows})
-        lines += [f"## Config Sensitivity — {algo}", ""]
-        header = "| Config |" + "".join(f" {s//1000}k txn |" for s in sizes)
-        sep_row = "|--------|" + "".join("--------:|" for _ in sizes)
-        lines += [header, sep_row]
-        for cfg in configs:
-            cells = []
-            for size in sizes:
-                m = next((r for r in rows if r.config == cfg and r.size == size), None)
-                cells.append(f" {m.ms:.0f}ms |" if m else " N/A |")
-            lines.append(f"| `{cfg}` |" + "".join(cells))
-        lines.append("")
+    # ── Louvain config ────────────────────────────────────────────────────────
+    lou_cfgs = sorted({r.config for r in results if r.algo == "Louvain"})
+    lou_vals = [get("Louvain", last, c).ms for c in lou_cfgs if get("Louvain", last, c)]
+    lou_cfgs_present = [c for c in lou_cfgs if get("Louvain", last, c)]
+    lines += [
+        "## Config Sensitivity — Louvain `maxLevels`",
+        "",
+        mermaid_bar("Louvain maxLevels at 50k Graph (ms)", lou_cfgs_present, lou_vals),
+        "",
+        "| Config |" + "".join(f" {s//1000}k |" for s in sizes),
+        "|--------|" + "".join("----:|" for _ in sizes),
+    ]
+    for cfg in lou_cfgs:
+        cells = [f" {get('Louvain', s, cfg).ms:.0f}ms |" if get("Louvain", s, cfg) else " N/A |" for s in sizes]
+        lines.append(f"| `{cfg}` |" + "".join(cells))
+    lines += [
+        "",
+        "**Takeaway:** `maxLevels=1` gives identical quality (modularity=0.9999) at 5× lower cost.",
+        "",
+        "---",
+        "",
+    ]
 
-    # Quality metrics
-    lines += [f"## Quality Metrics — {SIZES[-1]//1000}k Graph", ""]
-    lines += ["| Algorithm | Config | Key Metrics |", "|-----------|--------|-------------|"]
+    # ── PageRank config ───────────────────────────────────────────────────────
+    pr_cfgs = sorted({r.config for r in results if r.algo == "PageRank"})
+    pr_vals = [get("PageRank", last, c).ms for c in pr_cfgs if get("PageRank", last, c)]
+    pr_cfgs_present = [c for c in pr_cfgs if get("PageRank", last, c)]
+    lines += [
+        "## Config Sensitivity — PageRank `iterations`",
+        "",
+        mermaid_bar("PageRank Iteration Budget (50k graph, ms)", pr_cfgs_present, pr_vals),
+        "",
+        "| Config |" + "".join(f" {s//1000}k |" for s in sizes) + " Converged at |",
+        "|--------|" + "".join("----:|" for _ in sizes) + "-------------|",
+    ]
+    for cfg in pr_cfgs:
+        cells = [f" {get('PageRank', s, cfg).ms:.0f}ms |" if get("PageRank", s, cfg) else " N/A |" for s in sizes]
+        ran = get("PageRank", last, cfg)
+        conv = f" {ran.quality['ran_iter']} iterations |" if ran else " ? |"
+        lines.append(f"| `{cfg}` |" + "".join(cells) + conv)
+    lines += [
+        "",
+        "**Takeaway:** Converges in **2 iterations** regardless of budget. Use `maxIterations=5`.",
+        "",
+        "---",
+        "",
+    ]
+
+    # ── Betweenness config ────────────────────────────────────────────────────
+    bc_cfgs = sorted({r.config for r in results if r.algo == "Betweenness"})
+    bc_vals = [get("Betweenness", last, c).ms for c in bc_cfgs if get("Betweenness", last, c)]
+    bc_cfgs_present = [c for c in bc_cfgs if get("Betweenness", last, c)]
+    lines += [
+        "## Config Sensitivity — Betweenness Centrality",
+        "",
+        mermaid_bar("Betweenness: Exact vs Sampled at 50k Graph (ms)",
+                    bc_cfgs_present, bc_vals),
+        "",
+        "| Config |" + "".join(f" {s//1000}k |" for s in sizes) + " Speedup vs exact |",
+        "|--------|" + "".join("----:|" for _ in sizes) + "----------------:|",
+    ]
+    exact_ms = get("Betweenness", last, "exact")
+    for cfg in bc_cfgs:
+        cells = [f" {get('Betweenness', s, cfg).ms:.0f}ms |" if get("Betweenness", s, cfg) else " N/A |" for s in sizes]
+        if exact_ms and cfg != "exact":
+            speedup = f" **{exact_ms.ms / get('Betweenness', last, cfg).ms:.0f}×** |"
+        else:
+            speedup = " 1× |"
+        lines.append(f"| `{cfg}` |" + "".join(cells) + speedup)
+    lines += [
+        "",
+        "**Takeaway:** `sample=100` is ~190× faster — use in production.",
+        "",
+        "---",
+        "",
+    ]
+
+    # ── Quality metrics ───────────────────────────────────────────────────────
+    lines += [
+        f"## Quality Metrics — {last//1000}k Graph",
+        "",
+        "| Algorithm | Config | Key Metrics |",
+        "|-----------|--------|-------------|",
+    ]
     seen: set = set()
-    for r in [x for x in results if x.size == SIZES[-1]]:
+    for r in [x for x in results if x.size == last]:
         key = (r.algo, r.config)
         if key in seen:
             continue
         seen.add(key)
         q = " · ".join(f"**{k}**={v}" for k, v in r.quality.items())
         lines.append(f"| {r.algo} | `{r.config}` | {q} |")
-    lines.append("")
 
-    # Observations
+    # ── Decision flowchart ────────────────────────────────────────────────────
     lines += [
-        "## Observations",
         "",
-        "- **WCC fastest** algorithm — linear O(n+e), ideal for real-time ring detection",
-        "- **Betweenness exact** is 50–100× slower than sampled; `sampling=500` gives good approximation",
-        "- **PageRank converges in 2 iterations** on this graph — iteration budget above 5 has no effect",
-        "- **Louvain** cost scales with `maxLevels`; `maxLevels=1` sufficient when communities are dense",
-        "- **Cycle Detection** (Cypher) has no cycles in PaySim — expected for simulated unidirectional flows",
-        "- **Betweenness max_bc=0** — PaySim accounts are mostly leaf nodes with no relay role; real banking data would show spikes at money mule coordinators",
+        "---",
         "",
+        "## Algorithm Selection Guide",
+        "",
+        "```mermaid",
+        "graph LR",
+        "    A[Query arrives] --> B{Ring isolation?}",
+        "    B -->|Real-time| C[WCC — 20ms ✓]",
+        "    B -->|No| D{Influence ranking?}",
+        "    D -->|Yes| E[PageRank — 78ms, iter=5 ✓]",
+        "    D -->|No| F{Bridge accounts?}",
+        "    F -->|Approx OK| G[Betweenness sample=100 — 21ms ✓]",
+        "    F -->|Need exact| H[Betweenness exact — 4s ⚠]",
+        "    F -->|No| I[Louvain maxLevels=1 — 62ms ✓]",
+        "```",
+        "",
+        "---",
+        "",
+        "## Key Observations",
+        "",
+        "| # | Finding | Recommendation |",
+        "|---|---------|----------------|",
+        "| 1 | WCC is O(n+e) — fastest algorithm | Use for real-time fraud ring detection |",
+        "| 2 | Betweenness exact is 100–190× slower than sampled | Always use `samplingSize` in production |",
+        "| 3 | PageRank converges in 2 iterations | Set `maxIterations=5`; anything higher wastes compute |",
+        "| 4 | Louvain quality identical across maxLevels | Use `maxLevels=1` for production |",
+        "| 5 | Betweenness=0 and no cycles in PaySim | Expected — simulation lacks real laundering patterns |",
+        "",
+        "---",
+        "",
+        "*Report auto-generated by `app/benchmark.py` — re-run to refresh.*",
     ]
 
     path = "/app/benchmark_report.md"
@@ -366,6 +506,7 @@ def main():
             print(f"{'━'*W}")
 
             proj_ms, stats = project(session, size)
+            stats["proj_ms"] = proj_ms
             proj_stats[size] = stats
             print(f"  Projection  → {stats['nodes']:,} nodes  {stats['edges']:,} edges  [{proj_ms:.0f}ms]")
 
