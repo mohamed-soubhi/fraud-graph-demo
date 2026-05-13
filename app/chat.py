@@ -45,12 +45,14 @@ TX_TYPES = {"PAYMENT", "TRANSFER", "CASH_OUT", "DEBIT", "CASH_IN"}
 
 SCHEMA = """
 Graph schema:
-  (:Account {id, balance, pageRank, community, wccComponent, betweenness, triangleCount, flagVelocity, flagMule, flagDrain})
+  (:Account {id, balance, pageRank, community, wccComponent, betweenness, triangleCount,
+             flagVelocity, flagMule, flagDrain, fraudProb})
   (:Transaction {id, amount, type, step, isFraud, isFlagged, flagDrain})
   (:Account)-[:SENT]->(:Transaction)-[:RECEIVED_BY]->(:Account)
 
 Transaction types: PAYMENT, TRANSFER, CASH_OUT, DEBIT, CASH_IN
 Fraud flags on Account: flagVelocity, flagMule, flagDrain (boolean)
+fraudProb: float [0,1] — GraphSAGE GNN fraud probability (written by gnn_train.py)
 """
 
 PROMPT = PromptTemplate.from_template("""
