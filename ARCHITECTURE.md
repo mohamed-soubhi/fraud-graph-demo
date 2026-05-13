@@ -160,51 +160,99 @@ flowchart TD
 
 ---
 
-## NL Chat Pipeline
+## NL Chat Pipeline — LangGraph Self-Healing Agent
 
 Chat launches automatically after `run_all.py` completes — always, regardless of smoke test result.  
 Each session is logged to `logs/chat_YYYY-MM-DD_HH-MM-SS.log` (question · Cypher · results · timing).  
 To quit: type `quit` / `exit` / `q`.
 
-Two LangChain chains run per question — Cypher generator + result interpreter:
+### LangGraph State Machine
+
+`agent.py` implements a `StateGraph` with four nodes and conditional routing:
+
+```mermaid
+stateDiagram-v2
+    [*] --> generate_cypher
+    generate_cypher --> execute_cypher
+    execute_cypher --> interpret_results : success
+    execute_cypher --> fix_cypher : error AND retries ≤ 2
+    execute_cypher --> [*] : error AND retries > 2
+    fix_cypher --> execute_cypher
+    interpret_results --> [*]
+```
+
+| Node | Responsibility |
+|------|---------------|
+| `generate_cypher` | LLM receives schema + entities + question → Cypher string |
+| `execute_cypher` | Runs Cypher against Neo4j; increments `retries` on error |
+| `fix_cypher` | LLM receives failed query + error message → corrected Cypher |
+| `interpret_results` | LLM translates raw rows → 2–4 sentence fraud analyst answer |
+
+**State shape (`AgentState` TypedDict):**
+```python
+question · entities · cypher · cypher_error · rows · interpretation
+retries · cypher_ms · fix_ms · query_ms · interpret_ms
+```
+
+### Full Sequence Diagram
 
 ```mermaid
 sequenceDiagram
     participant U as User
     participant CH as chat.py
     participant SP as spaCy NER
-    participant LM1 as LLM Call 1\nCypher Generator
+    participant AG as LangGraph Agent\n(agent.py)
+    participant LM1 as LLM\nCypher Generator
     participant DB as Neo4j
-    participant LM2 as LLM Call 2\nResult Interpreter
+    participant LM2 as LLM\nCypher Fixer
+    participant LM3 as LLM\nResult Interpreter
     participant LOG as logs/chat_*.log
 
     U->>CH: "What is the most fraudulent account and why?"
     CH->>SP: extract entities
     SP-->>CH: None detected
-    CH->>LM1: PROMPT(schema + entities + question)
-    Note over LM1: ~1-2s · retries on 503
-    LM1-->>CH: MATCH (a:Account) ORDER BY a.fraudProb DESC LIMIT 1
-    CH->>DB: execute Cypher
-    DB-->>CH: {id: C123, fraudProb: 0.55, flagDrain: true, pageRank: 7.2}
-    CH->>LM2: INTERPRET_PROMPT(question + raw rows)
-    Note over LM2: ~1-2s · explains fraud signals
-    LM2-->>CH: "Account C123 is highest risk — drained balance in single transfer..."
-    CH->>U: raw rows + plain-English answer
-    CH->>LOG: question · Cypher · results · interpretation · all timings
+    CH->>AG: agent.invoke(initial_state(question, entities))
+
+    AG->>LM1: PROMPT(schema + entities + question)
+    Note over LM1: ~1-2s cloud inference
+    LM1-->>AG: MATCH (a:Account) ORDER BY a.fraudProb DESC LIMIT 1
+
+    AG->>DB: execute Cypher
+    alt success
+        DB-->>AG: {id: C123, fraudProb: 0.99, flagDrain: true, ...}
+        AG->>LM3: INTERPRET_PROMPT(question + raw rows)
+        LM3-->>AG: "Account C123 is highest risk..."
+    else error (retries ≤ 2)
+        DB-->>AG: Unknown property 'riskScore'
+        AG->>LM2: FIX_PROMPT(schema + question + failed_cypher + error)
+        LM2-->>AG: corrected Cypher
+        AG->>DB: retry execute
+        DB-->>AG: results
+        AG->>LM3: INTERPRET_PROMPT(question + raw rows)
+        LM3-->>AG: plain-English answer
+    else error (retries > 2)
+        AG-->>CH: state with cypher_error set, no interpretation
+    end
+
+    AG-->>CH: final AgentState
+    CH->>U: display Cypher + fix_note + results + Answer
+    CH->>LOG: all fields + timing breakdown
 ```
 
-**Two LangChain chains:**
+**Agent construction:**
 ```python
-chain           = PROMPT | llm           # generates Cypher
-interpret_chain = INTERPRET_PROMPT | llm # explains results in plain English
+agent = build_agent(llm, driver, cypher_chain, interpret_chain, SCHEMA)
+state = agent.invoke(initial_state(question, entity_str))
 ```
 
-**Retry logic:** On 503 overloaded — waits 5/10/15s, retries up to 3×. Interpreter failure is non-fatal — raw results still shown.
+**Retry logic:** `execute_cypher` routes to `fix_cypher` when `cypher_error` is set and `retries ≤ MAX_RETRIES (2)`. After exhausting retries, routes to `END` — session continues without crashing.
 
 **Schema exposed to Cypher LLM:**
 ```
 (:Account {id, balance, pageRank, community, wccComponent, betweenness,
            triangleCount, flagVelocity, flagMule, flagDrain, fraudProb})
+(:Transaction {id, amount, type, step, isFraud, isFlagged, flagDrain})
+(:Account)-[:SENT]->(:Transaction)-[:RECEIVED_BY]->(:Account)
 ```
 
 **Flag initialization:** `fraud_rules.py` sets `flagVelocity=false`, `flagMule=false`, `flagDrain=false` on all accounts before running rules — eliminates null values that break boolean filters.
@@ -268,6 +316,7 @@ fraud-graph-demo/
 │   ├── fraud_rules.py        ← 3 Cypher fraud detection rules
 │   ├── gds_analysis.py       ← 5 GDS algorithms + Cypher cycle detection
 │   ├── gnn_train.py          ← GraphSAGE 3-layer · fraudProb → Neo4j
+│   ├── agent.py              ← LangGraph StateGraph (generate→execute→fix→interpret)
 │   ├── chat.py               ← spaCy NER + LangChain + Ollama NL→Cypher + session logging
 │   ├── run_all.py            ← full pipeline smoke test (9 checks) + auto-launch chat
 │   └── benchmark.py          ← timing benchmark across 4 sizes × 3 configs

@@ -222,22 +222,41 @@ def format_entities(entities: dict) -> str:
 
 # ── main loop ────────────────────────────────────────────────────────────────
 
-def chat_loop():
-    nlp              = load_nlp()
-    driver           = GraphDatabase.driver(URI, auth=(USER, PASSWORD))
-    llm              = OllamaCloudLLM(model=OLLAMA_MODEL, base_url=OLLAMA_URL, api_key=OLLAMA_KEY)
-    chain            = PROMPT | llm
-    interpret_chain  = INTERPRET_PROMPT | llm
-    logger           = ChatLogger()
+def _llm_invoke_with_retry(chain, inputs: dict) -> str:
+    """Call chain.invoke with up to 3 retries on 503 overload."""
+    for attempt in range(1, 4):
+        try:
+            return chain.invoke(inputs).strip()
+        except Exception as e:
+            msg = str(e)
+            if "503" in msg or "overloaded" in msg.lower():
+                wait = attempt * 5
+                print(f"  LLM overloaded — retrying in {wait}s (attempt {attempt}/3)...")
+                time.sleep(wait)
+            else:
+                raise
+    raise RuntimeError("LLM unavailable after 3 retries")
 
-    print(f"Fraud Graph Chat — type a question, 'quit' to exit")
+
+def chat_loop():
+    from agent import build_agent, initial_state
+
+    nlp             = load_nlp()
+    driver          = GraphDatabase.driver(URI, auth=(USER, PASSWORD))
+    llm             = OllamaCloudLLM(model=OLLAMA_MODEL, base_url=OLLAMA_URL, api_key=OLLAMA_KEY)
+    chain           = PROMPT | llm
+    interpret_chain = INTERPRET_PROMPT | llm
+    agent           = build_agent(llm, driver, chain, interpret_chain, SCHEMA)
+    logger          = ChatLogger()
+
+    print(f"Fraud Graph Chat (LangGraph self-healing agent) — type a question, 'quit' to exit")
     print(f"Session log → {logger.path}\n")
 
     demo_questions = [
         "Which accounts sent over $100k to flagged accounts?",
         "Show me the top 5 most suspicious accounts by PageRank",
         "Which accounts have fraudProb > 0.8 but no rule flags set?",
-        "Find accounts that emptied their balance in a single transfer",
+        "What is the most fraudulent account and why?",
     ]
     print("Demo questions to try:")
     for q in demo_questions:
@@ -255,95 +274,57 @@ def chat_loop():
         entity_str = format_entities(entities)
         print(f"\nExtracted: {entity_str}")
 
-        print("Generating Cypher...")
-        t0     = time.perf_counter()
-        cypher = None
-        cypher_ms = 0.0
-        llm_error = None
-
-        for attempt in range(1, 4):          # up to 3 retries
-            try:
-                cypher = chain.invoke({
-                    "schema":   SCHEMA,
-                    "entities": entity_str,
-                    "question": question,
-                }).strip()
-                cypher_ms = (time.perf_counter() - t0) * 1000
-                break
-            except Exception as e:
-                msg = str(e)
-                if "503" in msg or "overloaded" in msg.lower():
-                    wait = attempt * 5
-                    print(f"  LLM overloaded — retrying in {wait}s (attempt {attempt}/3)...")
-                    time.sleep(wait)
-                    t0 = time.perf_counter()
-                else:
-                    llm_error = msg
-                    break
-
-        if cypher is None:
-            err = llm_error or "LLM unavailable after 3 retries"
-            print(f"  LLM error: {err}\n")
+        print("Running agent (generate → execute → [fix →] interpret)...")
+        try:
+            state = agent.invoke(initial_state(question, entity_str))
+        except Exception as e:
+            print(f"  Agent error: {e}\n")
             logger.log_interaction(
                 question=question, entities=entity_str,
                 cypher="(none)", cypher_ms=0,
-                rows=None, query_ms=0, error=err,
+                rows=None, query_ms=0, error=str(e),
             )
             print("  (logged)\n")
             continue
 
-        print(f"\nCypher [{cypher_ms:.0f}ms]:\n{cypher}\n")
+        cypher         = state.get("cypher", "(none)")
+        cypher_ms      = state.get("cypher_ms", 0.0)
+        fix_ms         = state.get("fix_ms", 0.0)
+        rows           = state.get("rows")
+        query_ms       = state.get("query_ms", 0.0)
+        cypher_error   = state.get("cypher_error")
+        interpretation = state.get("interpretation")
+        interpret_ms   = state.get("interpret_ms", 0.0)
+        retries        = state.get("retries", 0)
 
-        rows             = None
-        query_ms         = 0.0
-        error            = None
-        interpretation   = None
-        interpret_ms     = 0.0
+        fix_note = f" (fixed after {retries} attempt(s))" if fix_ms > 0 else ""
+        print(f"\nCypher [{cypher_ms:.0f}ms{fix_note}]:\n{cypher}\n")
 
-        try:
-            t1 = time.perf_counter()
-            with driver.session() as session:
-                rows = session.run(cypher).data()
-            query_ms = (time.perf_counter() - t1) * 1000
-            if rows:
-                print(f"Results ({len(rows)} rows) [{query_ms:.0f}ms]:")
-                for r in rows[:10]:
-                    print(f"  {r}")
-                if len(rows) > 10:
-                    print(f"  … {len(rows)-10} more rows")
-            else:
-                print(f"No results. [{query_ms:.0f}ms]")
-        except Exception as e:
-            error = str(e)
-            print(f"Query error: {error}")
+        if cypher_error:
+            print(f"Query failed after {retries} fix attempt(s): {cypher_error}")
+        elif rows:
+            print(f"Results ({len(rows)} rows) [{query_ms:.0f}ms]:")
+            for r in rows[:10]:
+                print(f"  {r}")
+            if len(rows) > 10:
+                print(f"  … {len(rows)-10} more rows")
+        else:
+            print(f"No results. [{query_ms:.0f}ms]")
 
-        # ── result interpretation ─────────────────────────────────────────
-        if rows and not error:
-            print("\nInterpreting results...")
-            results_str = "\n".join(str(r) for r in rows[:10])
-            ti = time.perf_counter()
-            try:
-                interpretation = interpret_chain.invoke({
-                    "question": question,
-                    "results":  results_str,
-                }).strip()
-                interpret_ms = (time.perf_counter() - ti) * 1000
-                print(f"\n{'─'*50}")
-                print(f"Answer [{interpret_ms:.0f}ms]:")
-                print(f"  {interpretation}")
-                print(f"{'─'*50}")
-            except Exception as e:
-                interpret_ms = (time.perf_counter() - ti) * 1000
-                print(f"  (interpretation failed: {e})")
+        if interpretation:
+            print(f"\n{'─'*50}")
+            print(f"Answer [{interpret_ms:.0f}ms]:")
+            print(f"  {interpretation}")
+            print(f"{'─'*50}")
 
         logger.log_interaction(
             question=question,
             entities=entity_str,
             cypher=cypher,
-            cypher_ms=cypher_ms,
+            cypher_ms=cypher_ms + fix_ms,
             rows=rows,
             query_ms=query_ms,
-            error=error,
+            error=cypher_error,
             interpretation=interpretation,
             interpret_ms=interpret_ms,
         )

@@ -55,7 +55,7 @@ docker compose exec app python app/run_all.py
 | Graph algorithms | Louvain · PageRank · WCC · Betweenness Centrality · Cycle Detection |
 | GNN | GraphSAGE (PyTorch Geometric) — node classification → `fraudProb` |
 | Fraud rules | Cypher pattern queries (velocity, mule chain, balance drain) |
-| NL interface | LangChain + spaCy NER + Ollama Cloud (`deepseek-v4-flash`) |
+| NL interface | LangGraph self-healing agent · LangChain · spaCy NER · Ollama Cloud (`deepseek-v4-flash`) |
 | Infrastructure | Docker Compose (two containers: neo4j + app) |
 | Language | Python 3.11 |
 | Dataset | PaySim synthetic fraud transactions (Kaggle) |
@@ -275,21 +275,34 @@ Union of rule flags and GNN predictions (if either fires → fraud). This maximi
 
 ---
 
-### NL→Cypher Pipeline
+### NL→Cypher Pipeline (LangGraph Self-Healing Agent)
 
-Natural language queries are processed in three stages:
+Natural language queries flow through a **LangGraph state machine** with four nodes:
 
-1. **spaCy NER** — extracts entities from the question: amounts (`$100k` → `100000`), transaction types (`TRANSFER`, `CASH_OUT`), account IDs
-2. **LangChain prompt** — injects graph schema + extracted entities + question into the LLM prompt, constraining the output to valid Cypher
-3. **Ollama Cloud `deepseek-v4-flash`** — generates Cypher (~1–2s cloud inference), returned and executed directly against Neo4j
-
-Timing for each stage is displayed in the chat interface:
 ```
-Cypher [1243ms]:
+generate_cypher → execute_cypher → interpret_results → END
+                       ↓ (on error, retries ≤ 2)
+                   fix_cypher → execute_cypher
+```
+
+1. **spaCy NER** — extracts entities from the question: amounts (`$100k` → `100000`), transaction types, account IDs (`C123…`, `M456…`)
+2. **generate_cypher** — LLM receives schema + extracted entities + question → produces Cypher
+3. **execute_cypher** — runs query against Neo4j; on error, routes to `fix_cypher` (max 2 retries); on success, routes to `interpret_results`
+4. **fix_cypher** — LLM receives failed query + Neo4j error message → produces corrected Cypher; loops back to `execute_cypher`
+5. **interpret_results** — second LLM call translates raw Neo4j rows into a 2–4 sentence plain-English fraud analyst answer
+
+Chat output shows timing per stage and fix attempts:
+```
+Cypher [1243ms (fixed after 1 attempt)]:
 MATCH (a:Account) WHERE a.pageRank > 2 ...
 
 Results (5 rows) [18ms]:
-...
+  {'a.id': 'C666654362', ...}
+
+Answer [1421ms]:
+  Account C666654362 ranks highest by PageRank (score 8.2), making it a central
+  aggregator in the money-flow network. It also carries a mule flag — it sits on
+  an A→B→C→CASH_OUT layering chain, confirming it acts as a relay node...
 ```
 
 ---
@@ -956,6 +969,98 @@ WHERE a.fraudProb > 0.7
 
 ---
 
+### TC-21 — LangGraph: Cypher self-healing on bad query
+
+Ask a question that tends to produce malformed Cypher on the first attempt (e.g., using a non-existent property):
+
+```
+Question: Show accounts where riskScore is above 0.9
+```
+
+**Expect:**
+```
+Running agent (generate → execute → [fix →] interpret)...
+
+Cypher [1100ms (fixed after 1 attempt)]:
+MATCH (a:Account) WHERE a.fraudProb > 0.9 RETURN a.id, a.fraudProb ...
+```
+
+- `riskScore` does not exist in schema → Neo4j returns `Unknown property`
+- `fix_cypher` node receives the error + original query → LLM corrects to `fraudProb`
+- Second execution succeeds
+- `(fixed after 1 attempt)` note appears in output
+- Full interaction logged to `logs/chat_*.log` including both Cypher versions
+
+**Verify:** No crash. `fix_note` appears. Final result is valid.
+
+---
+
+### TC-22 — LangGraph: max retries exceeded — graceful failure
+
+Force a question that produces consistently invalid Cypher (e.g., property that doesn't exist and isn't correctable without schema):
+
+```
+Question: Show all accounts where creditRating > 700 and riskBand = 'HIGH'
+```
+
+**Expect (if fix attempts also fail):**
+```
+Running agent (generate → execute → [fix →] interpret)...
+
+Cypher [4200ms]:
+MATCH (a:Account) WHERE a.creditRating > 700 ...
+
+Query failed after 2 fix attempt(s): [Neo4j error message]
+```
+
+- Agent routes `execute_cypher → fix_cypher → execute_cypher → fix_cypher → execute_cypher`
+- After `MAX_RETRIES = 2` exhausted, routes to `END` without interpret step
+- Error displayed clearly; session does not crash
+- Next question prompt appears immediately
+
+**Verify:** Chat continues. Log shows all 3 Cypher attempts (original + 2 fixes).
+
+---
+
+### TC-23 — LangGraph: full pipeline timing breakdown
+
+Ask a meaningful "why" question that exercises all four agent nodes:
+
+```
+Question: What is the most fraudulent account and why?
+```
+
+**Expect full pipeline output:**
+```
+Running agent (generate → execute → [fix →] interpret)...
+
+Cypher [1050ms]:
+MATCH (a:Account)
+RETURN a.id, a.fraudProb, a.flagVelocity, a.flagMule, a.flagDrain,
+       a.pageRank, a.betweenness, a.community
+ORDER BY a.fraudProb DESC LIMIT 1
+
+Results (1 rows) [23ms]:
+  {'a.id': 'C...', 'fraudProb': 0.9871, 'flagDrain': True, ...}
+
+──────────────────────────────────────────────────
+Answer [1398ms]:
+  Account C... is the highest-risk account in the dataset with a GNN score of
+  98.7%. It triggered the drain rule (smash-and-grab — balance emptied ≥95% in
+  one transfer) and sits in Louvain community X alongside Y other flagged accounts.
+  Its elevated PageRank confirms it acted as a central aggregator before the drain.
+──────────────────────────────────────────────────
+  (logged)
+```
+
+**Verify:**
+- `generate_cypher` returns all relevant fraud signal properties (not just id)
+- `execute_cypher` succeeds first attempt (no fix needed)
+- `interpret_results` produces 2–4 sentence answer with account ID, numeric values, fraud domain language
+- Total round-trip shown in log: `cypher_ms + query_ms + interpret_ms`
+
+---
+
 ## Stopping and Cleanup
 
 ```bash
@@ -987,6 +1092,7 @@ fraud-graph-demo/
 │   ├── fraud_rules.py        ← 3 Cypher fraud rules (velocity/mule/drain)
 │   ├── gds_analysis.py       ← 5 GDS algorithms + Cypher cycle detection
 │   ├── gnn_train.py          ← GraphSAGE 3-layer · fraudProb → Neo4j
+│   ├── agent.py              ← LangGraph self-healing Cypher agent (generate→execute→fix→interpret)
 │   ├── chat.py               ← spaCy NER + LangChain + Ollama NL→Cypher + session logging
 │   ├── run_all.py            ← full pipeline smoke test (9 checks) + auto-launch chat
 │   └── benchmark.py          ← timing benchmark → benchmark_report.md

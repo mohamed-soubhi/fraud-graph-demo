@@ -20,7 +20,8 @@
 | T-08 | GraphSAGE GNN layer | ✅ Done |
 | T-09 | Pipeline + chat logging | ✅ Done |
 | T-10 | Docker WSL fix (GitHub build context) | ✅ Done |
-| T-11 | Demo rehearsal script | ⬜ Todo |
+| T-11 | LangGraph self-healing Cypher agent (Option B) | ✅ Done |
+| T-12 | Demo rehearsal script | ⬜ Todo |
 
 ---
 
@@ -211,7 +212,28 @@ Fix: build context changed to GitHub git URL — Docker daemon clones repo direc
 
 ---
 
-## T-11 — Demo Rehearsal Script
+## T-11 — LangGraph Self-Healing Cypher Agent
+**Status:** ✅ Done
+
+`app/agent.py` — LangGraph `StateGraph` with four nodes:
+
+| Node | Role |
+|------|------|
+| `generate_cypher` | LLM → Cypher string |
+| `execute_cypher` | Run against Neo4j; route on error/success |
+| `fix_cypher` | LLM repairs failed Cypher using Neo4j error message |
+| `interpret_results` | LLM translates raw rows → plain-English fraud analyst answer |
+
+Routing: `execute_cypher → fix_cypher` on error (max `MAX_RETRIES=2`); `execute_cypher → END` after retries exhausted; `execute_cypher → interpret_results` on success.
+
+`app/chat.py` updated to call `agent.invoke(initial_state(...))` instead of direct chain calls.  
+`app/requirements.txt` — added `langgraph==0.2.76`.
+
+Test cases: TC-21 (self-healing), TC-22 (max retries), TC-23 (full pipeline timing) in README.md.
+
+---
+
+## T-12 — Demo Rehearsal Script
 **Status:** ⬜ Todo
 
 ### Demo flow (5 min)
