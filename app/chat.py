@@ -53,13 +53,28 @@ Graph schema:
   (:Account)-[:SENT]->(:Transaction)-[:RECEIVED_BY]->(:Account)
 
 Transaction types: PAYMENT, TRANSFER, CASH_OUT, DEBIT, CASH_IN
-Fraud flags on Account: flagVelocity, flagMule, flagDrain (boolean)
-fraudProb: float [0,1] — GraphSAGE GNN fraud probability (written by gnn_train.py)
+
+Account fraud signals (all properties are always set — never null):
+  flagVelocity  boolean — sent >3 transactions within 10 steps (card-testing)
+  flagMule      boolean — appears on A→B→C→cashout chain (money mule)
+  flagDrain     boolean — emptied ≥95% balance in one transfer (account takeover)
+  fraudProb     float [0,1] — GraphSAGE GNN score (neighbourhood-based, 3-hop)
+  pageRank      float — money-flow influence (high = central aggregator)
+  betweenness   float — relay/bridge position between accounts
+  community     int   — Louvain fraud ring cluster ID
+  wccComponent  int   — isolated connected component ID
 """
 
 PROMPT = PromptTemplate.from_template("""
-You are a Neo4j expert. Convert the user's question into a valid Cypher query.
-Return ONLY the Cypher query, no explanation.
+You are a Neo4j Cypher expert. Convert the question into a single valid Cypher query.
+Return ONLY the Cypher query — no markdown, no explanation, no comments.
+
+Rules:
+- For "why" or "explain" questions: return id plus ALL relevant fraud signals
+  (fraudProb, flagVelocity, flagMule, flagDrain, pageRank, betweenness, community)
+- For ranking questions: ORDER BY the most relevant property DESC, LIMIT 10
+- Never use properties that don't exist in the schema
+- All flag properties are boolean (never null) — safe to use in WHERE clauses
 
 {schema}
 

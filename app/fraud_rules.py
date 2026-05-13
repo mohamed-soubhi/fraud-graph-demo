@@ -52,8 +52,20 @@ RULES = {
 }
 
 
+def _init_flags(session):
+    """Set all flag properties to False on every Account before running rules.
+    Prevents null values on non-matching accounts — null breaks boolean filters."""
+    session.run(
+        "MATCH (a:Account) "
+        "SET a.flagVelocity = coalesce(a.flagVelocity, false), "
+        "    a.flagMule     = coalesce(a.flagMule, false), "
+        "    a.flagDrain    = coalesce(a.flagDrain, false)"
+    )
+
+
 def run_rules(driver):
     with driver.session() as session:
+        _init_flags(session)
         for name, rule in RULES.items():
             print(f"\n{'='*60}")
             print(f"RULE: {name.upper()}")
