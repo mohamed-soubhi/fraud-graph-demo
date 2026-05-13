@@ -70,6 +70,29 @@ def main():
                 "MATCH (a:Account) WHERE a.pageRank IS NOT NULL RETURN count(a) AS c"
             ).single()["c"] > 0,
         )
+        check(
+            "WCC component property set",
+            lambda: session.run(
+                "MATCH (a:Account) WHERE a.wccComponent IS NOT NULL RETURN count(a) AS c"
+            ).single()["c"] > 0,
+        )
+        check(
+            "Betweenness property set",
+            lambda: session.run(
+                "MATCH (a:Account) WHERE a.betweenness IS NOT NULL RETURN count(a) AS c"
+            ).single()["c"] > 0,
+        )
+        check(
+            "WCC fraud rings detected",
+            lambda: session.run("""
+                MATCH (a:Account)
+                WHERE a.wccComponent IS NOT NULL
+                WITH a.wccComponent AS c, count(a) AS size,
+                     sum(CASE WHEN a.flagVelocity OR a.flagMule OR a.flagDrain THEN 1 ELSE 0 END) AS flags
+                WHERE flags > 0
+                RETURN count(c) AS ringsWithFraud
+            """).single()["ringsWithFraud"] > 0,
+        )
     driver.close()
 
     print("\n" + "="*50)

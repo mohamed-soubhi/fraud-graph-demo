@@ -152,21 +152,23 @@ Found: 891 transactions
 
 ---
 
-### Step 6 — Run GDS community detection
+### Step 6 — Run GDS analysis
 
 ```bash
 docker compose exec app python app/gds_analysis.py
 ```
 
-Expected output:
-```
-Running Louvain community detection...
-Communities found: 284
-Largest fraud community size: 47 accounts
-PageRank scores written to Account nodes.
-```
+Runs five algorithms on an Account→Account virtual graph:
 
-Visualize in Neo4j Browser — style nodes by `community` property. Fraud clusters appear in red.
+| Algorithm | Node property written | Fraud signal |
+|---|---|---|
+| **Louvain** | `community` | High-fraud-density clusters |
+| **PageRank** | `pageRank` | Central money-hub accounts |
+| **WCC** | `wccComponent` | Isolated fraud rings |
+| **Betweenness** | `betweenness` | Bridge/relay accounts |
+| **Cycle Detection** | `triangleCount` | Circular layering flows (A→B→C→A) |
+
+Visualize in Neo4j Browser — style nodes by `community` or `wccComponent` property.
 
 ---
 
@@ -360,7 +362,7 @@ Run `docker compose exec app python chat.py` then type each:
 ```cypher
 // Find if two accounts are connected — replace IDs with real ones from TC-04
 MATCH (a:Account {id: 'C1231006815'}), (b:Account {id: 'C1666544250'})
-CALL gds.shortestPath.dijkstra.stream('fraud-graph', {
+CALL gds.shortestPath.dijkstra.stream('fraud-account-graph', {
   sourceNode: a,
   targetNode: b
 })
@@ -371,6 +373,43 @@ RETURN [n IN nodes(path) | n.id] AS hops, length(path) AS distance
 **Talking point:** "SQL would need 4+ self-joins for this 4-hop query. Neo4j traverses it natively in milliseconds."
 
 > Replace account IDs with real ones from your dataset — pick two from TC-04 output.
+
+---
+
+### TC-11 — WCC: largest fraud-dense connected components
+
+```cypher
+MATCH (a:Account)
+WHERE a.wccComponent IS NOT NULL
+WITH a.wccComponent AS component,
+     count(a) AS total,
+     sum(CASE WHEN a.flagVelocity OR a.flagMule OR a.flagDrain THEN 1 ELSE 0 END) AS fraudAccounts
+WHERE fraudAccounts > 0
+RETURN component, total, fraudAccounts,
+       round(fraudAccounts * 100.0 / total, 1) AS fraud_pct
+ORDER BY fraudAccounts DESC LIMIT 10
+```
+
+**Expect:** Components with multiple fraud accounts — isolated rings with no legitimate exit paths.
+
+---
+
+### TC-12 — Betweenness: top relay accounts by centrality
+
+```cypher
+MATCH (a:Account)
+WHERE a.betweenness IS NOT NULL
+RETURN a.id AS account,
+       round(a.betweenness, 2) AS betweenness,
+       CASE WHEN a.flagVelocity THEN 'velocity ' ELSE '' END +
+       CASE WHEN a.flagMule     THEN 'mule '     ELSE '' END +
+       CASE WHEN a.flagDrain    THEN 'drain'      ELSE '' END AS flags
+ORDER BY betweenness DESC LIMIT 10
+```
+
+**Expect:** Accounts with high betweenness sit on shortest paths between many others — key relay nodes in money flow networks. High betweenness + fraud flag = confirmed mule.
+
+> **Note:** PaySim is a simulation with mostly leaf-node accounts. Betweenness scores may be low — this is expected and is a valid talking point: "In real banking data, betweenness spikes identify layering coordinators."
 
 ---
 
@@ -400,7 +439,7 @@ fraud-graph-demo/
 │   ├── requirements.txt
 │   ├── ingest.py         ← T-03: load PaySim → Neo4j
 │   ├── fraud_rules.py    ← T-04: Cypher fraud patterns
-│   ├── gds_analysis.py   ← T-05: GDS Louvain + PageRank
+│   ├── gds_analysis.py   ← T-05: GDS Louvain, PageRank, WCC, Betweenness, Cycle Detection
 │   ├── chat.py           ← T-06: LangChain + Ollama NL chat
 │   └── run_all.py        ← T-07: full pipeline runner
 └── data/
