@@ -20,11 +20,12 @@ services:
       retries: 5
 
   app:
-    build: ./app
+    build:
+      context: "https://github.com/mohamed-soubhi/fraud-graph-demo.git#master"
+      dockerfile: app/Dockerfile
     container_name: fraud-app
     env_file: .env
     volumes:
-      - ./app:/app
       - ./data:/app/data
     depends_on:
       neo4j:

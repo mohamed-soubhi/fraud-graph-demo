@@ -8,13 +8,13 @@ RUN pip install --no-cache-dir \
 RUN pip install --no-cache-dir \
     torch-geometric==2.5.3
 
-COPY requirements.txt .
+COPY app/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Install spaCy model directly — avoids malformed URL from `spacy download` in Docker
 RUN pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
 
-COPY . .
+COPY app/ .
 
 RUN chmod +x /app/entrypoint.sh
 
