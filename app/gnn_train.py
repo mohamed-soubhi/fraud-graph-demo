@@ -23,6 +23,8 @@ from rich.progress import (
 from rich.table import Table
 from rich import box
 
+from config import CFG, PRESET_NAME
+
 load_dotenv()
 
 console = Console()
@@ -31,27 +33,31 @@ URI      = os.environ["NEO4J_URI"]
 USER     = os.environ["NEO4J_USER"]
 PASSWORD = os.environ["NEO4J_PASSWORD"]
 
-EPOCHS     = 150
-HIDDEN_DIM = 64
-LR         = 0.005
-DROPOUT    = 0.3
+EPOCHS          = CFG["gnn_epochs"]
+HIDDEN_DIM      = CFG["gnn_hidden_dim"]
+NUM_LAYERS      = CFG["gnn_layers"]
+LR              = CFG["gnn_lr"]
+DROPOUT         = CFG["gnn_dropout"]
+FRAUD_THRESHOLD = CFG["gnn_fraud_threshold"]
 
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 
 class GraphSAGE(torch.nn.Module):
-    def __init__(self, in_channels: int, hidden: int, out_channels: int):
+    def __init__(self, in_channels: int, hidden: int, out_channels: int, num_layers: int):
         super().__init__()
-        self.conv1 = SAGEConv(in_channels, hidden)
-        self.conv2 = SAGEConv(hidden, hidden)
-        self.conv3 = SAGEConv(hidden, out_channels)
+        assert num_layers >= 2, "GraphSAGE requires at least 2 layers"
+        self.convs = torch.nn.ModuleList()
+        self.convs.append(SAGEConv(in_channels, hidden))
+        for _ in range(num_layers - 2):
+            self.convs.append(SAGEConv(hidden, hidden))
+        self.convs.append(SAGEConv(hidden, out_channels))
 
     def forward(self, x, edge_index):
-        x = self.conv1(x, edge_index).relu()
-        x = F.dropout(x, p=DROPOUT, training=self.training)
-        x = self.conv2(x, edge_index).relu()
-        x = F.dropout(x, p=DROPOUT, training=self.training)
-        return self.conv3(x, edge_index)
+        for conv in self.convs[:-1]:
+            x = conv(x, edge_index).relu()
+            x = F.dropout(x, p=DROPOUT, training=self.training)
+        return self.convs[-1](x, edge_index)
 
 
 # ── Neo4j helpers ──────────────────────────────────────────────────────────────
@@ -138,7 +144,7 @@ def evaluate(model, data, mask):
     with torch.no_grad():
         logits = model(data.x, data.edge_index)[mask]
         probs  = torch.sigmoid(logits[:, 1]).numpy()
-        preds  = (probs >= 0.5).astype(int)
+        preds  = (probs >= FRAUD_THRESHOLD).astype(int)
         y_true = data.y[mask].numpy()
     auc = roc_auc_score(y_true, probs) if len(np.unique(y_true)) > 1 else 0.0
     return dict(
@@ -167,7 +173,7 @@ def ensemble_metrics(data, mask, model):
         gnn_probs = torch.sigmoid(model(data.x, data.edge_index)[mask][:, 1]).numpy()
     feat       = data.x[mask]
     rule_preds = ((feat[:, 3] + feat[:, 4] + feat[:, 5]) > 0).numpy().astype(int)
-    gnn_preds  = (gnn_probs >= 0.5).astype(int)
+    gnn_preds  = (gnn_probs >= FRAUD_THRESHOLD).astype(int)
     preds      = np.clip(rule_preds + gnn_preds, 0, 1)
     y_true     = data.y[mask].numpy()
     return dict(
@@ -182,8 +188,10 @@ def ensemble_metrics(data, mask, model):
 def main():
     console.print()
     console.print(Panel.fit(
-        "[bold cyan]GNN Fraud Detection — GraphSAGE[/bold cyan]\n"
-        "[dim]Account→Account money-flow graph  ·  CPU  ·  3 layers  ·  hidden=64  ·  dropout=0.3[/dim]",
+        f"[bold cyan]GNN Fraud Detection — GraphSAGE[/bold cyan]\n"
+        f"[dim]Account→Account money-flow graph  ·  CPU  ·  "
+        f"{NUM_LAYERS} layers  ·  hidden={HIDDEN_DIM}  ·  "
+        f"epochs={EPOCHS}  ·  threshold={FRAUD_THRESHOLD}  ·  preset={PRESET_NAME}[/dim]",
         border_style="cyan",
     ))
     console.print()
@@ -244,7 +252,7 @@ def main():
     # ── 3 — Train ──────────────────────────────────────────────────────────────
     console.print("[bold white][[cyan]3/5[/cyan]] Training GraphSAGE...[/bold white]")
 
-    model = GraphSAGE(data.x.shape[1], HIDDEN_DIM, 2)
+    model = GraphSAGE(data.x.shape[1], HIDDEN_DIM, 2, NUM_LAYERS)
     opt   = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=5e-4)
     w     = torch.tensor([1.0, float(pos_weight)])
 

@@ -24,8 +24,9 @@ URI          = os.environ["NEO4J_URI"]
 USER         = os.environ["NEO4J_USER"]
 PASSWORD     = os.environ["NEO4J_PASSWORD"]
 OLLAMA_URL   = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2")
 OLLAMA_KEY   = os.environ.get("OLLAMA_API_KEY", "")
+# Config preset can pin a model; env var is the fallback for deployment flexibility
+OLLAMA_MODEL = CFG.get("llm_model") or os.environ.get("OLLAMA_MODEL", "llama3.2")
 
 
 class OllamaCloudLLM(LLM):
