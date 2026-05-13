@@ -213,3 +213,43 @@ fraud-graph-demo/
 | Louvain | `maxLevels=1` | Same modularity (0.9999), 5× cheaper |
 | PageRank | `maxIterations=5` | Converges in 2 iterations on this graph; higher wastes compute |
 | Ingest | MERGE not CREATE | Idempotent — safe to re-run; entrypoint skips if DB already populated |
+| Cycle detection | Cypher 2+3-hop instead of GDS triangleCount | GDS triangleCount requires UNDIRECTED projection; money flows are directed |
+
+---
+
+## Algorithm Design Rationale
+
+### Why Louvain for Community Detection?
+
+Louvain maximises **modularity** — the fraction of edges inside communities minus the expected fraction if edges were placed randomly. Fraud rings have dense internal edges (accounts transact repeatedly within the ring) and few external edges (they avoid legitimate accounts). This structure scores high modularity, making Louvain naturally suited to isolate fraud rings.
+
+Alternatives considered:
+- **Label Propagation** — faster but non-deterministic; different runs produce different communities
+- **K-Means on embeddings** — requires feature engineering; Louvain works directly on graph structure
+
+### Why PageRank for Coordinator Detection?
+
+In a money-flow graph, PageRank propagates "importance" along transaction edges. Accounts that receive funds from many other accounts accumulate high PageRank — they are the **aggregation points** in the layering chain. Unlike simple degree centrality (count of connections), PageRank weights connections by the importance of the sender, making it robust to accounts that simply have many low-value connections.
+
+### Why WCC for Real-Time Ring Isolation?
+
+WCC runs in **O(n+e)** via union-find. It's the only algorithm in the pipeline that can scale to streaming fraud detection. The insight: legitimate accounts connect to the broad transaction network (thousands of reachable accounts); fraud rings are self-contained subgraphs with limited external connections. WCC assigns all nodes in a connected component the same ID — downstream filtering then flags components where fraud density exceeds a threshold.
+
+### Why Betweenness Sampling?
+
+Exact betweenness requires computing shortest paths between **all pairs of nodes** — O(n·e) for unweighted graphs, O(n·e + n²·log n) for weighted. At 78k nodes this is 4.5 seconds. Approximate betweenness samples a random subset of source nodes (100 here) and extrapolates — **142× faster** with near-identical rankings for the highest-betweenness nodes (which are the fraud signals we care about).
+
+### Why Cypher Cycle Detection instead of GDS triangleCount?
+
+GDS triangle counting requires an UNDIRECTED projection because triangles are symmetric (A-B-C-A is the same as A-C-B-A in an undirected graph). Our Account→Account projection is **directed** — money flows from sender to receiver, not both ways. Projecting as UNDIRECTED would lose the directional information needed to distinguish genuine circular flows from coincidental return payments. Cypher pattern matching on the directed graph is slower (~115ms) but semantically correct.
+
+### Graph Projection Design
+
+The raw PaySim graph is **bipartite**: Accounts and Transactions are separate node types connected by `SENT` and `RECEIVED_BY` relationships. GDS community/centrality algorithms are designed for **unipartite** graphs (one node type). The Cypher projection solves this by collapsing each `Account→Transaction→Account` path into a virtual direct `Account→Account` edge:
+
+```
+Raw graph:    (src:Account) -[:SENT]-> (tx:Transaction) -[:RECEIVED_BY]-> (dst:Account)
+Projected:    (src:Account) ──────────────────────────────────────────────> (dst:Account)
+```
+
+Native projection alternative (rejected): mapping `SENT` relationships would give `Account→Transaction` edges — GDS would see Transaction nodes as the neighbours of Account nodes, producing meaningless community assignments.
