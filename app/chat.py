@@ -5,6 +5,7 @@ spaCy pre-processing reduces LLM hallucinations by grounding recognized entities
 """
 import os
 import re
+import time
 import spacy
 import ollama
 from typing import Any, List, Optional
@@ -165,21 +166,25 @@ def chat_loop():
         print(f"\nExtracted: {entity_str}")
 
         print("Generating Cypher...")
+        t0 = time.perf_counter()
         cypher = chain.invoke({
             "schema":   SCHEMA,
             "entities": entity_str,
             "question": question,
         }).strip()
-        print(f"\nCypher:\n{cypher}\n")
+        cypher_ms = (time.perf_counter() - t0) * 1000
+        print(f"\nCypher [{cypher_ms:.0f}ms]:\n{cypher}\n")
 
         try:
+            t1 = time.perf_counter()
             rows = run_cypher(driver, cypher)
+            query_ms = (time.perf_counter() - t1) * 1000
             if rows:
-                print(f"Results ({len(rows)} rows):")
+                print(f"Results ({len(rows)} rows) [{query_ms:.0f}ms]:")
                 for r in rows[:10]:
                     print(f"  {r}")
             else:
-                print("No results.")
+                print(f"No results. [{query_ms:.0f}ms]")
         except Exception as e:
             print(f"Query error: {e}")
         print()
