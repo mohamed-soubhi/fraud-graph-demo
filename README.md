@@ -35,12 +35,12 @@ docker compose exec app python app/run_all.py
 #   [3/5] GDS        ~5s      Louvain · PageRank · WCC · Betweenness · Cycle
 #   [4/5] GNN        ~3 min   GraphSAGE 150 epochs → fraudProb on every account
 #   [5/5] verify     ~5s      9 smoke-test checks
-#   → on ALL PASS: chat launches automatically
+#   → chat always launches after pipeline (pass or fail)
 #   → pipeline log saved to logs/run_YYYY-MM-DD_HH-MM-SS.log
 #   → chat log saved to  logs/chat_YYYY-MM-DD_HH-MM-SS.log
+#   → to quit chat:  quit / exit / q  then Enter
 
 # 5 — open Neo4j Browser:  http://localhost:7474
-# 6 — to quit chat:  type  quit  (or exit / q)  then Enter
 ```
 
 **Expected total time:** ~6 minutes on first run (Docker build) · ~5 minutes on subsequent runs
@@ -514,7 +514,7 @@ GNN writes `fraudProb ∈ [0,1]` to every Account node — queryable in Neo4j Br
 
 ### Step 8 — Start natural language chat
 
-Chat launches **automatically** after `run_all.py` completes with ALL PASS.
+Chat launches **automatically** after `run_all.py` completes — always, regardless of smoke test result.
 
 To start chat standalone:
 
@@ -554,7 +554,7 @@ See [TC-09 — NL Chat](#tc-09--nl-chat-question-types) for a full list of quest
 docker exec -it fraud-app python /app/run_all.py
 ```
 
-Runs all steps in sequence: ingest → fraud rules → GDS → GNN → verify (9 checks) → chat.
+Runs all steps in sequence: ingest → fraud rules → GDS → GNN → verify (9 checks) → chat (always).
 
 - Pipeline log → `logs/run_YYYY-MM-DD_HH-MM-SS.log`
 - Chat log → `logs/chat_YYYY-MM-DD_HH-MM-SS.log`
@@ -919,7 +919,7 @@ fraud-graph-demo/
 | CSV not found | Check file is in `data/` with exact filename from Kaggle |
 | Out of memory | Reduce `LOAD_LIMIT` in `.env` (default 50000) |
 | Code changes not reflected in container | Image builds from GitHub — push changes, then `docker compose up -d --build` |
-| Chat doesn't launch after `run_all.py` | At least one smoke check failed — check SMOKE TEST RESULTS output |
+| Chat doesn't launch after `run_all.py` | Image is outdated — run `bash run.sh` to rebuild from latest GitHub |
 | Chat questions return empty | GNN questions need `gnn_train.py` to have run first (check `fraudProb IS NOT NULL` count) |
 | `gnn_train.py` — `ModuleNotFoundError: torch_geometric` | Rebuild image: `docker compose up -d --build` |
 | `gnn_train.py` — `GNN fraudProb written: FAIL` | Run `gds_analysis.py` first — GNN needs GDS properties as features |

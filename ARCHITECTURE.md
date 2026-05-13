@@ -162,7 +162,7 @@ flowchart TD
 
 ## NL Chat Pipeline
 
-Chat launches automatically after `run_all.py` completes with ALL PASS.  
+Chat launches automatically after `run_all.py` completes — always, regardless of smoke test result.  
 Each session is logged to `logs/chat_YYYY-MM-DD_HH-MM-SS.log` (question · Cypher · results · timing).  
 To quit: type `quit` / `exit` / `q`.
 

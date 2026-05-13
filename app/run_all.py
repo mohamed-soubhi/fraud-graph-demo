@@ -168,13 +168,10 @@ def main():
     sys.stderr = tee._stream
     tee.close()
 
-    if all_pass:
-        print("\nPipeline complete — launching chat interface...\n")
-        import chat
-        chat.chat_loop()
-        sys.exit(0)
-    else:
-        sys.exit(1)
+    print("\nLaunching chat interface... (type 'quit' to exit)\n")
+    import chat
+    chat.chat_loop()
+    sys.exit(0 if all_pass else 1)
 
 
 if __name__ == "__main__":
