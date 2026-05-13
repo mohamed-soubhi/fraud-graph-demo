@@ -5,6 +5,7 @@ End-to-end fraud detection knowledge graph demonstrating graph engineering and A
 ![Neo4j](https://img.shields.io/badge/Neo4j-5_Community-008CC1?style=for-the-badge&logo=neo4j&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker_Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-GraphSAGE-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)
 ![LangChain](https://img.shields.io/badge/LangChain-1C3C3C?style=for-the-badge&logo=langchain&logoColor=white)
 ![Ollama](https://img.shields.io/badge/Ollama_Cloud-deepseek--v4--flash-black?style=for-the-badge&logo=ollama&logoColor=white)
 ![spaCy](https://img.shields.io/badge/spaCy_NER-09A3D5?style=for-the-badge&logo=spacy&logoColor=white)
@@ -16,6 +17,7 @@ End-to-end fraud detection knowledge graph demonstrating graph engineering and A
 |-------|-----------|
 | Graph DB | Neo4j 5 Community + GDS 2.13 plugin |
 | Graph algorithms | Louvain · PageRank · WCC · Betweenness Centrality · Cycle Detection |
+| GNN | GraphSAGE (PyTorch Geometric) — node classification → `fraudProb` |
 | Fraud rules | Cypher pattern queries (velocity, mule chain, balance drain) |
 | NL interface | LangChain + spaCy NER + Ollama Cloud (`deepseek-v4-flash`) |
 | Infrastructure | Docker Compose (two containers: neo4j + app) |
@@ -201,6 +203,42 @@ graph LR
     D -->|Circular flows| J[Cycle Detection Cypher — 115ms ✓]
 ```
 
+### GNN Layer — GraphSAGE
+
+GraphSAGE (Graph SAmple and aggreGatE) extends the rule-based and GDS layers with **learned fraud patterns** — it captures complex neighborhood interactions that fixed rules miss.
+
+**Architecture:** 3-layer GraphSAGE
+```
+Input (6 features) → SAGEConv(64) → ReLU → Dropout(0.3)
+                   → SAGEConv(64) → ReLU → Dropout(0.3)
+                   → SAGEConv(2)  → sigmoid → fraudProb ∈ [0,1]
+```
+
+**Node features fed into GNN:**
+
+| Feature | Source | What it captures |
+|---------|--------|-----------------|
+| `pageRank` | GDS PageRank | Account influence in money-flow network |
+| `betweenness` | GDS Betweenness | Bridge / relay position |
+| `wccComponent` | GDS WCC | Ring membership (normalized) |
+| `flagVelocity` | Fraud rule | Rapid-fire transaction signal |
+| `flagMule` | Fraud rule | Mule chain participation signal |
+| `flagDrain` | Fraud rule | Balance drain signal |
+
+**Why GraphSAGE over GCN?**  
+GraphSAGE is **inductive** — it learns an aggregation function rather than fixed node embeddings. New accounts appearing after training can be scored immediately without retraining. GCN is transductive (requires all nodes at train time).
+
+**Class imbalance handling:**  
+PaySim fraud rate ≈ 1.3% → severe imbalance. Weighted cross-entropy loss assigns `pos_weight = num_clean / num_fraud` (~74×) to penalise missed fraud detections more than false positives.
+
+**What the GNN learns that rules miss:**  
+Rules fire on explicit patterns (`flagVelocity`, `flagMule`, `flagDrain`). GraphSAGE learns from the **neighbourhood structure** — an account with moderate PageRank, no rule flags, but surrounded by flagged accounts can still receive a high `fraudProb`. This catches "clean-looking" accounts that are structurally embedded in fraud rings.
+
+**Ensemble (Rules + GNN):**  
+Union of rule flags and GNN predictions (if either fires → fraud). This maximises recall — the primary concern in fraud detection where a missed fraud is more costly than a false positive.
+
+---
+
 ### NL→Cypher Pipeline
 
 Natural language queries are processed in three stages:
@@ -233,6 +271,8 @@ flowchart LR
     DB --> CH["chat.py\nspaCy + LangChain\n+ Ollama Cloud"]
     FR -->|flags| DB
     GDS -->|properties| DB
+    GDS --> GNN["gnn_train.py\nGraphSAGE · fraudProb"]
+    GNN -->|fraudProb| DB
     CH -->|Cypher| DB
 ```
 
@@ -391,7 +431,52 @@ Visualize in Neo4j Browser — style nodes by `community` or `wccComponent` prop
 
 ---
 
-### Step 7 — Start natural language chat
+### Step 7 — Run GNN (GraphSAGE)
+
+```bash
+docker compose exec app python app/gnn_train.py
+```
+
+Trains a 3-layer GraphSAGE model on the Account→Account money-flow graph.  
+Uses GDS-written properties as node features — must run Step 6 first.
+
+Example output:
+```
+╭──────────────────────────────────────────────────────────────╮
+│  GNN Fraud Detection — GraphSAGE                             │
+│  Account→Account money-flow graph · CPU · 3 layers · hidden=64 │
+╰──────────────────────────────────────────────────────────────╯
+
+[1/5] Loading graph from Neo4j...
+  ✓ 78,499 account nodes · 50,000 edges · 1,043 fraud accounts (1.33%) · 2.1s
+
+[2/5] Building PyG graph...
+  Features (6): pageRank · betweenness · wccComponent · flagVelocity · flagMule · flagDrain
+  Class imbalance → pos_weight = 74.3 (weighted cross-entropy)
+  Split: train 47,099 · val 15,700 · test 15,700
+
+[3/5] Training GraphSAGE...
+  epochs ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 150/150  loss: 0.1842  val_auc: 0.921
+
+[4/5] Evaluating on test set...
+  ┌─────────────────┬──────────┐       ┌──────────────────────────┬───────────┬─────────┬───────┐
+  │ Metric          │ Score    │       │ Method                   │ Precision │ Recall  │ F1    │
+  ├─────────────────┼──────────┤       ├──────────────────────────┼───────────┼─────────┼───────┤
+  │ Precision       │ 0.8312   │       │ Rules only               │ 0.821     │ 0.612   │ 0.702 │
+  │ Recall          │ 0.7841   │       │ GraphSAGE (GNN)          │ 0.831     │ 0.784   │ 0.807 │
+  │ F1              │ 0.8070   │       │ Rules + GNN ensemble     │ 0.819     │ 0.851   │ 0.835 │
+  │ AUC-ROC         │ 0.9213   │       └──────────────────────────┴───────────┴─────────┴───────┘
+  │ Accuracy        │ 0.9934   │
+  └─────────────────┴──────────┘
+
+[5/5] Writing fraudProb to Neo4j...  ✓ 78,499 accounts updated
+```
+
+GNN writes `fraudProb ∈ [0,1]` to every Account node — queryable in Neo4j Browser and via NL chat.
+
+---
+
+### Step 8 — Start natural language chat
 
 ```bash
 docker compose exec app python app/chat.py
@@ -412,13 +497,13 @@ You: exit
 
 ---
 
-### Step 8 — Full pipeline (one command)
+### Step 9 — Full pipeline (one command)
 
 ```bash
 docker compose exec app python app/run_all.py
 ```
 
-Runs all steps in sequence with progress output.
+Runs all steps in sequence: ingest → fraud rules → GDS → GNN → verify (9 checks).
 
 ---
 

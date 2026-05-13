@@ -2,6 +2,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# PyTorch CPU-only — separate layer so Docker caches it independently
+RUN pip install --no-cache-dir \
+    torch==2.4.0 --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir \
+    torch-geometric==2.5.3
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

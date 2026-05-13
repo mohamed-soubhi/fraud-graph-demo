@@ -1,4 +1,4 @@
-"""T-07: End-to-end smoke test — runs full pipeline and reports pass/fail."""
+"""End-to-end smoke test — runs full pipeline and reports pass/fail."""
 import os, sys
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
@@ -24,23 +24,23 @@ def check(label, fn):
 def main():
     print("Running full pipeline smoke test...\n")
 
-    # 1 — ingest
-    print("[1/4] Ingesting data...")
+    print("[1/5] Ingesting data...")
     import ingest
     ingest.main()
 
-    # 2 — fraud rules
-    print("\n[2/4] Running fraud rules...")
+    print("\n[2/5] Running fraud rules...")
     import fraud_rules
     fraud_rules.main()
 
-    # 3 — GDS
-    print("\n[3/4] Running GDS analysis...")
+    print("\n[3/5] Running GDS analysis...")
     import gds_analysis
     gds_analysis.main()
 
-    # 4 — verify graph state
-    print("\n[4/4] Verifying graph state...")
+    print("\n[4/5] Running GNN (GraphSAGE)...")
+    import gnn_train
+    gnn_train.main()
+
+    print("\n[5/5] Verifying graph state...")
     driver = GraphDatabase.driver(URI, auth=(USER, PASSWORD))
     with driver.session() as session:
         check(
@@ -93,11 +93,17 @@ def main():
                 RETURN count(c) AS ringsWithFraud
             """).single()["ringsWithFraud"] > 0,
         )
+        check(
+            "GNN fraudProb written",
+            lambda: session.run(
+                "MATCH (a:Account) WHERE a.fraudProb IS NOT NULL RETURN count(a) AS c"
+            ).single()["c"] > 0,
+        )
     driver.close()
 
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
     print("SMOKE TEST RESULTS")
-    print("="*50)
+    print("=" * 50)
     all_pass = True
     for label, status, detail in CHECKS:
         icon = "✓" if status == "PASS" else "✗"
@@ -105,7 +111,7 @@ def main():
         if status == "FAIL":
             all_pass = False
 
-    print("="*50)
+    print("=" * 50)
     print("OVERALL:", "ALL PASS" if all_pass else "FAILURES DETECTED")
     sys.exit(0 if all_pass else 1)
 
