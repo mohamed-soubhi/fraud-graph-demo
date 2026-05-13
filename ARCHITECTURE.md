@@ -162,6 +162,10 @@ flowchart TD
 
 ## NL Chat Pipeline
 
+Chat launches automatically after `run_all.py` completes with ALL PASS.  
+Each session is logged to `logs/chat_YYYY-MM-DD_HH-MM-SS.log` (question · Cypher · results · timing).  
+To quit: type `quit` / `exit` / `q`.
+
 ```mermaid
 sequenceDiagram
     participant U as User
@@ -169,17 +173,26 @@ sequenceDiagram
     participant SP as spaCy NER
     participant LM as Ollama Cloud\ndeepseek-v4-flash
     participant DB as Neo4j
+    participant LOG as logs/chat_*.log
 
-    U->>CH: "Which accounts sent over $100k to flagged accounts?"
+    U->>CH: "Which accounts have fraudProb > 0.8 but no rule flags?"
     CH->>SP: extract entities
-    SP-->>CH: amounts=[100000], tx_types=[], accounts=[]
+    SP-->>CH: amounts=[], tx_types=[], accounts=[]
     CH->>LM: schema + entities + question → generate Cypher
-    Note over LM: ~1-2s (cloud API)
-    LM-->>CH: MATCH (src:Account)-[:SENT]->...
+    Note over LM: schema includes fraudProb\n(GNN output) ~1-2s
+    LM-->>CH: MATCH (a:Account) WHERE a.fraudProb > 0.8...
     CH->>DB: execute Cypher [time shown]
     DB-->>CH: result rows [time shown]
     CH->>U: display results + timing
+    CH->>LOG: log question · entities · Cypher · results · round-trip ms
 ```
+
+**Schema exposed to LLM** (enables GNN queries):
+```
+(:Account {id, balance, pageRank, community, wccComponent, betweenness,
+           triangleCount, flagVelocity, flagMule, flagDrain, fraudProb})
+```
+`fraudProb` is a float [0,1] written by `gnn_train.py` — without it in the schema, the LLM cannot generate fraud probability queries.
 
 ---
 
@@ -239,9 +252,14 @@ fraud-graph-demo/
 │   ├── ingest.py             ← PaySim CSV → Neo4j (MERGE batches)
 │   ├── fraud_rules.py        ← 3 Cypher fraud detection rules
 │   ├── gds_analysis.py       ← 5 GDS algorithms + Cypher cycle detection
-│   ├── chat.py               ← spaCy NER + LangChain + Ollama NL→Cypher
-│   ├── run_all.py            ← full pipeline smoke test (8 checks)
+│   ├── gnn_train.py          ← GraphSAGE 3-layer · fraudProb → Neo4j
+│   ├── chat.py               ← spaCy NER + LangChain + Ollama NL→Cypher + session logging
+│   ├── run_all.py            ← full pipeline smoke test (9 checks) + auto-launch chat
 │   └── benchmark.py          ← timing benchmark across 4 sizes × 3 configs
+│
+├── logs/                     ← run evidence (volume-mounted from container)
+│   ├── run_YYYY-MM-DD_HH-MM-SS.log   ← full pipeline output
+│   └── chat_YYYY-MM-DD_HH-MM-SS.log  ← chat session log
 │
 └── data/
     └── *.csv                 ← PaySim dataset (gitignored)

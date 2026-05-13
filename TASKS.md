@@ -11,13 +11,16 @@
 |--------|-------------|--------|
 | T-01 | Project setup + Docker | ✅ Done |
 | T-01b | Kaggle MCP server config | ✅ Done |
-| T-02 | Download PaySim dataset | ⬜ Blocked: restart Claude Code |
+| T-02 | Download PaySim dataset | ✅ Done |
 | T-03 | Neo4j schema + ingestion | ✅ Done |
 | T-04 | Fraud detection Cypher rules | ✅ Done |
 | T-05 | GDS community detection | ✅ Done |
 | T-06 | LangChain + Ollama NL chat | ✅ Done |
 | T-07 | End-to-end smoke test | ✅ Done |
-| T-08 | Demo rehearsal script | ⬜ Todo |
+| T-08 | GraphSAGE GNN layer | ✅ Done |
+| T-09 | Pipeline + chat logging | ✅ Done |
+| T-10 | Docker WSL fix (GitHub build context) | ✅ Done |
+| T-11 | Demo rehearsal script | ⬜ Todo |
 
 ---
 
@@ -127,46 +130,102 @@ nameDest, oldbalanceDest, newbalanceDest, isFraud, isFlaggedFraud
 ---
 
 ## T-06 — LangChain + Ollama NL Chat
-**Status:** ⬜ Todo  
+**Status:** ✅ Done  
 **Commit:** `feat: langchain ollama natural language graph queries`
 
-### Steps
-1. Add `OLLAMA_API_KEY` to `.env`
-2. Run: `docker compose exec app python app/chat.py`
-3. Test questions:
-   - `"Which accounts sent over $100k to flagged accounts?"`
-   - `"Show me the top 5 most suspicious accounts by PageRank"`
-   - `"Find accounts that emptied their balance in a single transfer"`
+Chat starts automatically after `run_all.py` ALL PASS.  
+Standalone: `docker exec -it fraud-app python /app/chat.py`  
+Quit: `quit` / `exit` / `q`  
+Session log: `logs/chat_YYYY-MM-DD_HH-MM-SS.log`
+
+### Rule-based questions
+- `"Which accounts sent over $100k to flagged accounts?"`
+- `"Find accounts that emptied their balance in a single transfer"`
+- `"How many accounts are flagged as money mules?"`
+- `"Show accounts with rapid transaction velocity"`
+
+### GDS / topology questions
+- `"Show me the top 5 most suspicious accounts by PageRank"`
+- `"Which community has the highest fraud density?"`
+- `"How many isolated fraud rings does WCC detect?"`
+- `"Find the top relay accounts by betweenness centrality"`
+- `"How many transactions are labeled as fraud?"`
+
+### GNN questions (requires gnn_train.py to have run)
+- `"Which accounts have fraud probability above 0.8?"`
+- `"Show accounts the GNN flagged but rules missed"`
+- `"What is the average fraud probability per community?"`
+- `"Find high-PageRank accounts with high fraud probability"`
+
+### Ensemble / comparison questions
+- `"Which accounts are flagged by rules but GNN says are safe?"`
+- `"Show accounts both the GNN and rules flag as fraud"`
+- `"Which accounts sent money to accounts with fraudProb above 0.9?"`
 
 ---
 
 ## T-07 — End-to-End Smoke Test
-**Status:** ⬜ Todo  
+**Status:** ✅ Done  
 **Commit:** `test: end-to-end smoke test all components`
 
-### Steps
-1. Fresh start: `docker compose down -v && docker compose up -d`
-2. Run full pipeline: `docker compose exec app python app/run_all.py`
-3. Confirm:
-   - [ ] Nodes loaded (Account + Transaction counts)
-   - [ ] Fraud rules return results
-   - [ ] GDS communities assigned
-   - [ ] Chat responds to 3 test queries
+Run: `docker exec -it fraud-app python /app/run_all.py`
+
+9 checks:
+- [x] Account nodes loaded
+- [x] Transaction nodes loaded
+- [x] Fraud flags exist
+- [x] Community property set
+- [x] PageRank property set
+- [x] WCC component property set
+- [x] Betweenness property set
+- [x] WCC fraud rings detected
+- [x] GNN fraudProb written
+
+Pipeline log → `logs/run_*.log` · Chat log → `logs/chat_*.log`
 
 ---
 
-## T-08 — Demo Rehearsal Script
-**Status:** ⬜ Todo  
+## T-08 — GraphSAGE GNN Layer
+**Status:** ✅ Done  
+**Commit:** `feat: add GraphSAGE GNN layer for fraud node classification`
+
+3-layer GraphSAGE · 150 epochs · fraudProb written to all Account nodes  
+Ensemble: Rules OR GNN → maximises recall
+
+---
+
+## T-09 — Pipeline + Chat Logging
+**Status:** ✅ Done
+
+- `run_all.py` logs all stdout/stderr to `logs/run_*.log`
+- `chat.py` logs each interaction (question · entities · Cypher · results · timing) to `logs/chat_*.log`
+- Both logs volume-mounted to host `./logs/` automatically
+
+---
+
+## T-10 — Docker WSL Fix
+**Status:** ✅ Done
+
+`app/` is a broken Windows NTFS junction (d---------) from WSL.  
+Fix: build context changed to GitHub git URL — Docker daemon clones repo directly.
+
+---
+
+## T-11 — Demo Rehearsal Script
+**Status:** ⬜ Todo
 
 ### Demo flow (5 min)
 1. **(30s)** Open Neo4j Browser → show full graph → "this is 50K PaySim transactions"
 2. **(60s)** Run mule chain Cypher → explain graph traversal advantage over SQL
 3. **(60s)** Show GDS Louvain result → fraud community highlighted in red
-4. **(90s)** Live chat demo → type NL question → show auto-generated Cypher → show answer
-5. **(60s)** Architecture diagram → mention Kafka/Spark/Airflow as production scale-up path
+4. **(60s)** Show GNN result → `WHERE a.fraudProb > 0.8 AND NOT a.flagMule` → "hidden accomplices"
+5. **(90s)** Live chat demo → type NL question → show auto-generated Cypher → show answer
+6. **(60s)** Architecture diagram → mention Kafka/Spark/Airflow as production scale-up path
 
 ### Key talking points during demo
 - "Neo4j finds this 4-hop money mule chain in milliseconds — SQL would require 4 self-joins"
 - "GDS runs PageRank and community detection natively — no data export needed"
+- "GraphSAGE aggregates 3 hops of neighbourhood structure — catches clean-looking accounts embedded in fraud rings"
 - "LangChain translates analyst questions to Cypher automatically — democratizes graph access"
+- "Every run is logged — pipeline output and chat sessions are evidence artifacts"
 - "Production version would use Kafka for real-time transaction streaming into the graph"

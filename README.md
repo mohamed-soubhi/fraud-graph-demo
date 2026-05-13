@@ -28,17 +28,19 @@ cp .env.example .env          # set OLLAMA_API_KEY and NEO4J_PASSWORD
 docker compose up -d --build  # first build ~5–8 min (PyTorch layer)
 docker compose ps             # wait until both show "healthy"
 
-# 4 — run full pipeline (ingest → rules → GDS → GNN)
+# 4 — run full pipeline + chat (all in one command)
 docker compose exec app python app/run_all.py
 #   [1/5] ingest     ~2 min   50k transactions → Neo4j
 #   [2/5] rules      ~5s      velocity · mule chain · balance drain
 #   [3/5] GDS        ~5s      Louvain · PageRank · WCC · Betweenness · Cycle
 #   [4/5] GNN        ~3 min   GraphSAGE 150 epochs → fraudProb on every account
 #   [5/5] verify     ~5s      9 smoke-test checks
+#   → on ALL PASS: chat launches automatically
+#   → pipeline log saved to logs/run_YYYY-MM-DD_HH-MM-SS.log
+#   → chat log saved to  logs/chat_YYYY-MM-DD_HH-MM-SS.log
 
 # 5 — open Neo4j Browser:  http://localhost:7474
-# 6 — start NL chat
-docker compose exec app python app/chat.py
+# 6 — to quit chat:  type  quit  (or exit / q)  then Enter
 ```
 
 **Expected total time:** ~6 minutes on first run (Docker build) · ~5 minutes on subsequent runs
@@ -512,32 +514,52 @@ GNN writes `fraudProb ∈ [0,1]` to every Account node — queryable in Neo4j Br
 
 ### Step 8 — Start natural language chat
 
+Chat launches **automatically** after `run_all.py` completes with ALL PASS.
+
+To start chat standalone:
+
 ```bash
-docker compose exec app python app/chat.py
+docker exec -it fraud-app python /app/chat.py
 ```
+
+To quit: type `quit` (or `exit` or `q`) and press Enter.
+
+Each session is logged to `logs/chat_YYYY-MM-DD_HH-MM-SS.log` on the host — includes every question, generated Cypher, query results, and round-trip timing.
 
 Example session:
 ```
-You: Which accounts sent over $100k to flagged accounts?
-Graph: Found 12 accounts. Top: C1234567 sent $450,000 to flagged C9876543.
+Question: Which accounts sent over $100k to flagged accounts?
+Extracted: Amounts (normalized): 100000.0
+Cypher [1243ms]:
+MATCH (src:Account)-[:SENT]->(tx:Transaction)-[:RECEIVED_BY]->(dst:Account)
+WHERE tx.amount > 100000 AND (dst.flagVelocity OR dst.flagMule OR dst.flagDrain)
+RETURN src.id, tx.amount, dst.id ORDER BY tx.amount DESC LIMIT 10
 
-You: Show the top 5 most suspicious accounts by PageRank
-Graph: 1. C8823901 (score: 4.21, 3 fraud transactions)
-       2. C4412309 (score: 3.87, flagged destination)
-       ...
+Results (10 rows) [18ms]:
+  {'src.id': 'C666654362', 'tx.amount': 5460002.91, 'dst.id': 'M1979787155'}
+  ...
+  (logged)
 
-You: exit
+Question: quit
+Chat session log saved → /app/logs/chat_2026-05-13_12-52-05.log
 ```
+
+See [TC-09 — NL Chat](#tc-09--nl-chat-question-types) for a full list of question types to try.
 
 ---
 
 ### Step 9 — Full pipeline (one command)
 
 ```bash
-docker compose exec app python app/run_all.py
+docker exec -it fraud-app python /app/run_all.py
 ```
 
-Runs all steps in sequence: ingest → fraud rules → GDS → GNN → verify (9 checks).
+Runs all steps in sequence: ingest → fraud rules → GDS → GNN → verify (9 checks) → chat.
+
+- Pipeline log → `logs/run_YYYY-MM-DD_HH-MM-SS.log`
+- Chat log → `logs/chat_YYYY-MM-DD_HH-MM-SS.log`
+
+Both appear on host automatically (volume-mounted).
 
 ---
 
@@ -679,19 +701,55 @@ ORDER BY pageRank DESC LIMIT 15
 
 ---
 
-### TC-09 — NL Chat: 5 demo questions
+### TC-09 — NL Chat: question types
 
-Run `docker compose exec app python chat.py` then type each:
+Chat starts automatically after `run_all.py` ALL PASS, or run standalone:
+
+```bash
+docker exec -it fraud-app python /app/chat.py
+```
+
+To quit: `quit` / `exit` / `q` + Enter.
+
+Each interaction is logged to `logs/chat_*.log` (question · entities · Cypher · timing · results).
+
+#### Rule-based questions (no GNN needed)
 
 | # | Question | Expected Cypher pattern |
 |---|----------|------------------------|
-| 1 | `Which accounts sent over $100k to flagged accounts?` | `WHERE tx.amount > 100000` + fraud flag join |
-| 2 | `Show me the top 5 most suspicious accounts by PageRank` | `ORDER BY a.pageRank DESC LIMIT 5` |
-| 3 | `Find accounts that emptied their balance in a single transfer` | `tx.amount >= src.balance * 0.95` |
-| 4 | `How many transactions are labeled as fraud?` | `count(tx) WHERE tx.isFraud = true` |
-| 5 | `Which community has the most fraud accounts?` | GROUP BY community, count flagged |
+| R1 | `Find accounts that emptied their balance in a single transfer` | `tx.amount >= src.balance * 0.95` |
+| R2 | `Which accounts sent over $100k to flagged accounts?` | `tx.amount > 100000` + flag join |
+| R3 | `How many accounts are flagged as money mules?` | `WHERE a.flagMule = true` |
+| R4 | `Show accounts with rapid transaction velocity` | `WHERE a.flagVelocity = true` |
 
-**Expect:** Valid Cypher generated for each; Neo4j returns non-empty results for Q2 and Q4 regardless of sample size
+#### GDS / graph topology questions
+
+| # | Question | Expected Cypher pattern |
+|---|----------|------------------------|
+| G1 | `Show me the top 5 most suspicious accounts by PageRank` | `ORDER BY a.pageRank DESC LIMIT 5` |
+| G2 | `Which community has the highest fraud density?` | GROUP BY community, `fraud_pct` DESC |
+| G3 | `How many isolated fraud rings does WCC detect?` | GROUP BY wccComponent, flag count |
+| G4 | `Find the top relay accounts by betweenness centrality` | `ORDER BY a.betweenness DESC` |
+| G5 | `How many transactions are labeled as fraud?` | `count(tx) WHERE tx.isFraud = true` |
+
+#### GNN questions (requires `fraudProb` — run gnn_train.py first)
+
+| # | Question | Expected Cypher pattern |
+|---|----------|------------------------|
+| N1 | `Which accounts have fraud probability above 0.8?` | `WHERE a.fraudProb > 0.8` |
+| N2 | `Show accounts the GNN flagged but rules missed` | `fraudProb > 0.7 AND NOT flagVelocity AND NOT flagMule AND NOT flagDrain` |
+| N3 | `What is the average fraud probability per community?` | GROUP BY community, `avg(a.fraudProb)` |
+| N4 | `Find high-PageRank accounts with high fraud probability` | `a.pageRank > 5 AND a.fraudProb > 0.5` |
+
+#### Ensemble / comparison questions
+
+| # | Question | Expected Cypher pattern |
+|---|----------|------------------------|
+| E1 | `Which accounts are flagged by rules but GNN says are safe?` | `flagVelocity OR flagMule OR flagDrain` AND `fraudProb < 0.2` |
+| E2 | `Show accounts both the GNN and rules flag as fraud` | all flags true AND `fraudProb > 0.7` |
+| E3 | `Which accounts sent money to accounts with fraudProb above 0.9?` | JOIN on SENT→RECEIVED_BY + `dst.fraudProb > 0.9` |
+
+**Expect:** Valid Cypher for all questions. GNN questions return empty results if `gnn_train.py` has not run yet.
 
 ---
 
@@ -836,9 +894,13 @@ fraud-graph-demo/
 │   ├── fraud_rules.py        ← 3 Cypher fraud rules (velocity/mule/drain)
 │   ├── gds_analysis.py       ← 5 GDS algorithms + Cypher cycle detection
 │   ├── gnn_train.py          ← GraphSAGE 3-layer · fraudProb → Neo4j
-│   ├── chat.py               ← spaCy NER + LangChain + Ollama NL→Cypher
-│   ├── run_all.py            ← full pipeline smoke test (9 checks)
+│   ├── chat.py               ← spaCy NER + LangChain + Ollama NL→Cypher + session logging
+│   ├── run_all.py            ← full pipeline smoke test (9 checks) + auto-launch chat
 │   └── benchmark.py          ← timing benchmark → benchmark_report.md
+│
+├── logs/                     ← run evidence (volume-mounted from container)
+│   ├── run_YYYY-MM-DD_HH-MM-SS.log   ← full pipeline output per run
+│   └── chat_YYYY-MM-DD_HH-MM-SS.log  ← chat session: Q · Cypher · results · timing
 │
 └── data/
     └── *.csv                 ← PaySim dataset (gitignored)
@@ -851,11 +913,16 @@ fraud-graph-demo/
 | Problem | Fix |
 |---------|-----|
 | Neo4j not ready | `docker compose logs neo4j` — wait for "Started" |
+| Container name conflict on `docker compose up` | `docker rm -f fraud-neo4j fraud-app` then retry |
 | GDS plugin missing | Check `NEO4J_PLUGINS` in docker-compose.yml |
 | Ollama auth error | Verify `OLLAMA_API_KEY` in `.env` |
 | CSV not found | Check file is in `data/` with exact filename from Kaggle |
 | Out of memory | Reduce `LOAD_LIMIT` in `.env` (default 50000) |
-| `gnn_train.py` — `ModuleNotFoundError: torch_geometric` | Rebuild image: `docker compose build --no-cache app` |
+| Code changes not reflected in container | Image builds from GitHub — push changes, then `docker compose up -d --build` |
+| Chat doesn't launch after `run_all.py` | At least one smoke check failed — check SMOKE TEST RESULTS output |
+| Chat questions return empty | GNN questions need `gnn_train.py` to have run first (check `fraudProb IS NOT NULL` count) |
+| `gnn_train.py` — `ModuleNotFoundError: torch_geometric` | Rebuild image: `docker compose up -d --build` |
 | `gnn_train.py` — `GNN fraudProb written: FAIL` | Run `gds_analysis.py` first — GNN needs GDS properties as features |
 | GNN training very slow | Expected on CPU — 150 epochs on 78k nodes takes ~2–3 min. Reduce `EPOCHS` in `gnn_train.py` to 50 for a quick test |
 | `fraudProb` all near 0 or 1 | Re-run after `gds_analysis.py` — if GDS properties are missing, features collapse to flag columns only |
+| Logs directory empty | Run `docker compose up -d` (not just `up`) to apply volume mount, then rerun pipeline |
