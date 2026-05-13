@@ -2,6 +2,14 @@
 
 End-to-end fraud detection knowledge graph demonstrating graph engineering and AI integration.
 
+![Neo4j](https://img.shields.io/badge/Neo4j-5_Community-008CC1?style=for-the-badge&logo=neo4j&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker_Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+![LangChain](https://img.shields.io/badge/LangChain-1C3C3C?style=for-the-badge&logo=langchain&logoColor=white)
+![Ollama](https://img.shields.io/badge/Ollama_Cloud-deepseek--v4--flash-black?style=for-the-badge&logo=ollama&logoColor=white)
+![spaCy](https://img.shields.io/badge/spaCy_NER-09A3D5?style=for-the-badge&logo=spacy&logoColor=white)
+![Kaggle](https://img.shields.io/badge/PaySim-Kaggle-20BEFF?style=for-the-badge&logo=kaggle&logoColor=white)
+
 ## Tech Stack
 
 | Layer | Technology |
