@@ -86,6 +86,31 @@ Question: {question}
 Cypher:
 """)
 
+INTERPRET_PROMPT = PromptTemplate.from_template("""
+You are a fraud analyst assistant. A user asked a question about a fraud detection graph database.
+Based on the Cypher query results below, write a concise 2-4 sentence plain-English answer.
+
+Explain WHAT the data shows and WHY it is significant for fraud detection.
+Reference specific account IDs and numeric values from the results.
+Use fraud domain language: money mule, smash-and-grab, velocity fraud, layering, GNN score, etc.
+
+Fraud signal meanings:
+  flagVelocity=true  → sent >3 transactions within 10 steps (card-testing)
+  flagMule=true      → on a A→B→C→cashout money mule chain (layering)
+  flagDrain=true     → emptied ≥95% balance in one transfer (account takeover)
+  fraudProb          → GraphSAGE GNN score: neighbourhood-based fraud probability [0,1]
+  pageRank           → money-flow influence (high = central aggregator hub)
+  betweenness        → relay/bridge node between many accounts (laundering coordinator)
+  community          → Louvain fraud ring cluster
+
+Question: {question}
+
+Query results (up to 10 rows):
+{results}
+
+Answer (plain English, 2-4 sentences):
+""")
+
 _ACCOUNT_RE = re.compile(r'\b[CM]\d+\b')
 _MONEY_RE   = re.compile(r'\$?([\d,]+\.?\d*)\s*([kKmM]?)\b')
 
@@ -114,8 +139,9 @@ class ChatLogger:
 
     def log_interaction(self, *, question: str, entities: str, cypher: str,
                         cypher_ms: float, rows: list | None, query_ms: float,
-                        error: str | None):
-        total_ms = cypher_ms + (query_ms if query_ms else 0)
+                        error: str | None, interpretation: str | None = None,
+                        interpret_ms: float = 0.0):
+        total_ms = cypher_ms + (query_ms if query_ms else 0) + interpret_ms
         ts = datetime.now().strftime("%H:%M:%S")
         block = (
             f"[{ts}] QUESTION\n"
@@ -132,7 +158,9 @@ class ChatLogger:
                 block += f"    {r}\n"
             if rows and len(rows) > 10:
                 block += f"    … {len(rows)-10} more rows\n"
-        block += f"  Total round-trip: {total_ms:.0f}ms\n"
+        if interpretation:
+            block += f"\n  Answer ({interpret_ms:.0f}ms):\n  {interpretation}\n"
+        block += f"\n  Total round-trip: {total_ms:.0f}ms\n"
         block += f"{'-'*60}\n\n"
         self._f.write(block)
         self._f.flush()
@@ -195,11 +223,12 @@ def format_entities(entities: dict) -> str:
 # ── main loop ────────────────────────────────────────────────────────────────
 
 def chat_loop():
-    nlp    = load_nlp()
-    driver = GraphDatabase.driver(URI, auth=(USER, PASSWORD))
-    llm    = OllamaCloudLLM(model=OLLAMA_MODEL, base_url=OLLAMA_URL, api_key=OLLAMA_KEY)
-    chain  = PROMPT | llm
-    logger = ChatLogger()
+    nlp              = load_nlp()
+    driver           = GraphDatabase.driver(URI, auth=(USER, PASSWORD))
+    llm              = OllamaCloudLLM(model=OLLAMA_MODEL, base_url=OLLAMA_URL, api_key=OLLAMA_KEY)
+    chain            = PROMPT | llm
+    interpret_chain  = INTERPRET_PROMPT | llm
+    logger           = ChatLogger()
 
     print(f"Fraud Graph Chat — type a question, 'quit' to exit")
     print(f"Session log → {logger.path}\n")
@@ -265,9 +294,12 @@ def chat_loop():
 
         print(f"\nCypher [{cypher_ms:.0f}ms]:\n{cypher}\n")
 
-        rows      = None
-        query_ms  = 0.0
-        error     = None
+        rows             = None
+        query_ms         = 0.0
+        error            = None
+        interpretation   = None
+        interpret_ms     = 0.0
+
         try:
             t1 = time.perf_counter()
             with driver.session() as session:
@@ -285,6 +317,25 @@ def chat_loop():
             error = str(e)
             print(f"Query error: {error}")
 
+        # ── result interpretation ─────────────────────────────────────────
+        if rows and not error:
+            print("\nInterpreting results...")
+            results_str = "\n".join(str(r) for r in rows[:10])
+            ti = time.perf_counter()
+            try:
+                interpretation = interpret_chain.invoke({
+                    "question": question,
+                    "results":  results_str,
+                }).strip()
+                interpret_ms = (time.perf_counter() - ti) * 1000
+                print(f"\n{'─'*50}")
+                print(f"Answer [{interpret_ms:.0f}ms]:")
+                print(f"  {interpretation}")
+                print(f"{'─'*50}")
+            except Exception as e:
+                interpret_ms = (time.perf_counter() - ti) * 1000
+                print(f"  (interpretation failed: {e})")
+
         logger.log_interaction(
             question=question,
             entities=entity_str,
@@ -293,6 +344,8 @@ def chat_loop():
             rows=rows,
             query_ms=query_ms,
             error=error,
+            interpretation=interpretation,
+            interpret_ms=interpret_ms,
         )
         print(f"  (logged)\n")
 
