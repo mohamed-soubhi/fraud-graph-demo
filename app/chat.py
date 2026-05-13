@@ -45,7 +45,7 @@ TX_TYPES = {"PAYMENT", "TRANSFER", "CASH_OUT", "DEBIT", "CASH_IN"}
 
 SCHEMA = """
 Graph schema:
-  (:Account {id, balance, pageRank, community, flagVelocity, flagMule, flagDrain})
+  (:Account {id, balance, pageRank, community, wccComponent, betweenness, triangleCount, flagVelocity, flagMule, flagDrain})
   (:Transaction {id, amount, type, step, isFraud, isFlagged, flagDrain})
   (:Account)-[:SENT]->(:Transaction)-[:RECEIVED_BY]->(:Account)
 
