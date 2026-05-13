@@ -312,10 +312,11 @@ fraud-graph-demo/
 │   ├── Dockerfile            ← python:3.11-slim + spaCy model
 │   ├── entrypoint.sh         ← auto-ingest if DB empty on startup
 │   ├── requirements.txt
+│   ├── config.py             ← fast/full presets (FRAUD_PRESET env var) for all ML params
 │   ├── ingest.py             ← PaySim CSV → Neo4j (MERGE batches)
-│   ├── fraud_rules.py        ← 3 Cypher fraud detection rules
-│   ├── gds_analysis.py       ← 5 GDS algorithms + Cypher cycle detection
-│   ├── gnn_train.py          ← GraphSAGE 3-layer · fraudProb → Neo4j
+│   ├── fraud_rules.py        ← 3 Cypher fraud rules (thresholds from config)
+│   ├── gds_analysis.py       ← 5 GDS algorithms + Cypher cycle detection (params from config)
+│   ├── gnn_train.py          ← GraphSAGE (arch/epochs/threshold from config) · fraudProb → Neo4j
 │   ├── agent.py              ← LangGraph StateGraph (generate→execute→fix→interpret)
 │   ├── chat.py               ← spaCy NER + LangChain + Ollama NL→Cypher + session logging
 │   ├── run_all.py            ← full pipeline smoke test (9 checks) + auto-launch chat

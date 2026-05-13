@@ -24,26 +24,29 @@ cp .env.example .env          # set OLLAMA_API_KEY and NEO4J_PASSWORD
 # 2 — download PaySim CSV from Kaggle → place in data/
 #     https://www.kaggle.com/datasets/ealaxi/paysim1
 
-# 3 — start containers (Neo4j + app)
+# 3 — single command: clean + build + run pipeline + chat
+bash run.sh                   # full preset (~5 min after first build)
+FRAUD_PRESET=fast bash run.sh # fast preset (~1.5 min — fewer GNN epochs, looser thresholds)
+
+# NOTE: image builds from GitHub master — push local changes before running
+
+# Manual equivalent (full control):
 docker compose up -d --build  # first build ~5–8 min (PyTorch layer)
-docker compose ps             # wait until both show "healthy"
-
-# 4 — run full pipeline + chat (all in one command)
-docker compose exec app python app/run_all.py
+docker compose exec app python /app/run_all.py
 #   [1/5] ingest     ~2 min   50k transactions → Neo4j
-#   [2/5] rules      ~5s      velocity · mule chain · balance drain
-#   [3/5] GDS        ~5s      Louvain · PageRank · WCC · Betweenness · Cycle
-#   [4/5] GNN        ~3 min   GraphSAGE 150 epochs → fraudProb on every account
-#   [5/5] verify     ~5s      9 smoke-test checks
-#   → chat always launches after pipeline (pass or fail)
-#   → pipeline log saved to logs/run_YYYY-MM-DD_HH-MM-SS.log
-#   → chat log saved to  logs/chat_YYYY-MM-DD_HH-MM-SS.log
-#   → to quit chat:  quit / exit / q  then Enter
+#   [2/5] rules      ~5s      velocity · mule chain · balance drain (thresholds from preset)
+#   [3/5] GDS        ~5s      Louvain · PageRank · WCC · Betweenness (params from preset)
+#   [4/5] GNN        ~3 min   GraphSAGE (layers/epochs/threshold from preset) → fraudProb
+#   [5/5] verify     ~5s      9 smoke-test checks → ALL PASS
+#   → LangGraph chat agent launches automatically
+#   → pipeline log → logs/run_YYYY-MM-DD_HH-MM-SS.log
+#   → chat log     → logs/chat_YYYY-MM-DD_HH-MM-SS.log
+#   → to quit chat: quit / exit / q + Enter
 
-# 5 — open Neo4j Browser:  http://localhost:7474
+# 4 — open Neo4j Browser:  http://localhost:7474
 ```
 
-**Expected total time:** ~6 minutes on first run (Docker build) · ~5 minutes on subsequent runs
+**Expected total time:** ~6 min first run (Docker build) · ~5 min subsequent (full) · ~1.5 min (fast)
 
 ---
 
@@ -53,9 +56,10 @@ docker compose exec app python app/run_all.py
 |-------|-----------|
 | Graph DB | Neo4j 5 Community + GDS 2.13 plugin |
 | Graph algorithms | Louvain · PageRank · WCC · Betweenness Centrality · Cycle Detection |
-| GNN | GraphSAGE (PyTorch Geometric) — node classification → `fraudProb` |
-| Fraud rules | Cypher pattern queries (velocity, mule chain, balance drain) |
+| GNN | GraphSAGE (PyTorch Geometric) — configurable layers/threshold → `fraudProb` |
+| Fraud rules | Cypher pattern queries — velocity, mule chain, balance drain (thresholds configurable) |
 | NL interface | LangGraph self-healing agent · LangChain · spaCy NER · Ollama Cloud (`deepseek-v4-flash`) |
+| Config system | `app/config.py` — `fast` / `full` presets for GDS, GNN, rules, LLM |
 | Infrastructure | Docker Compose (two containers: neo4j + app) |
 | Language | Python 3.11 |
 | Dataset | PaySim synthetic fraud transactions (Kaggle) |
@@ -66,7 +70,39 @@ docker compose exec app python app/run_all.py
 |----------|-------------|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System design, data model, pipeline diagrams (6 Mermaid charts) |
 | [benchmark_report.md](benchmark_report.md) | GDS algorithm benchmark — timing across 4 graph sizes and 3 config dimensions |
-| [README.md](README.md) | Setup guide + 12 manual test cases |
+| [README.md](README.md) | Setup guide + 23 manual test cases |
+
+---
+
+## Configuration Presets
+
+All algorithm parameters are controlled by `app/config.py`. Select via `FRAUD_PRESET` env var:
+
+```bash
+FRAUD_PRESET=full bash run.sh   # default — production-calibrated settings
+FRAUD_PRESET=fast bash run.sh   # demo/CI — 1.5 min total, looser thresholds
+```
+
+| Parameter | `fast` | `full` | What it controls |
+|-----------|--------|--------|-----------------|
+| **Fraud rules** | | | |
+| `velocity_tx_threshold` | `> 2` txn | `> 3` txn | Card-testing detection aggressiveness |
+| `velocity_window` | `15` steps | `10` steps | Time window for velocity rule |
+| `drain_pct` | `≥ 80%` balance | `≥ 95%` balance | Account-takeover drain threshold |
+| **GDS** | | | |
+| `louvain_max_levels` | `1` | `1` | Community detection depth (benchmarked: levels ≥1 identical) |
+| `pagerank_max_iterations` | `5` | `5` | Converges in 2 on this graph |
+| `betweenness_sampling` | `50` | `100` | Sampling budget (142× faster than exact) |
+| **GNN** | | | |
+| `gnn_epochs` | `30` | `150` | Training iterations |
+| `gnn_hidden_dim` | `32` | `64` | Layer width |
+| `gnn_layers` | `2` | `3` | GraphSAGE depth (ModuleList — fully configurable) |
+| `gnn_fraud_threshold` | `0.4` | `0.5` | Score cutoff for fraud classification |
+| **Chat agent** | | | |
+| `agent_max_retries` | `2` | `2` | Cypher self-healing max attempts |
+| `llm_model` | `env var` | `env var` | Override with model name to pin per preset |
+
+> **Interview talking point:** Fraud thresholds are business decisions, not technical constants. A retail bank vs a crypto exchange will tune `drain_pct` and `velocity_tx_threshold` very differently based on fraud loss tolerance vs false-positive cost.
 
 ---
 
@@ -523,11 +559,17 @@ Example output:
 
 GNN writes `fraudProb ∈ [0,1]` to every Account node — queryable in Neo4j Browser and via NL chat.
 
+> **On model scoring:** PaySim labels are derived from `isFraud` transaction flags AND rule flags (velocity/mule/drain). Since rule flags are also GNN input features, the model can achieve high recall by learning to reproduce rule signals. This is expected in a demo using synthetic data. In production, rule flags would be excluded from GNN features and used only as ensemble signals — the GNN would learn purely from graph topology (pageRank, betweenness, community structure, hop-neighbourhood patterns).
+
 ---
 
 ### Step 8 — Start natural language chat
 
 Chat launches **automatically** after `run_all.py` completes — always, regardless of smoke test result.
+
+The chat uses a **LangGraph self-healing agent** (`agent.py`):
+- `generate_cypher` → `execute_cypher` → `interpret_results` → END (happy path)
+- On Neo4j error: routes to `fix_cypher` → retries (max 2 attempts) before giving up
 
 To start chat standalone:
 
@@ -537,25 +579,39 @@ docker exec -it fraud-app python /app/chat.py
 
 To quit: type `quit` (or `exit` or `q`) and press Enter.
 
-Each session is logged to `logs/chat_YYYY-MM-DD_HH-MM-SS.log` on the host — includes every question, generated Cypher, query results, and round-trip timing.
+Each session is logged to `logs/chat_YYYY-MM-DD_HH-MM-SS.log` — question · entities · Cypher · results · plain-English answer · all timings.
 
-Example session:
+**Real session output** (from `logs/chat_2026-05-13_18-57-00.log`):
 ```
-Question: Which accounts sent over $100k to flagged accounts?
-Extracted: Amounts (normalized): 100000.0
-Cypher [1243ms]:
-MATCH (src:Account)-[:SENT]->(tx:Transaction)-[:RECEIVED_BY]->(dst:Account)
-WHERE tx.amount > 100000 AND (dst.flagVelocity OR dst.flagMule OR dst.flagDrain)
-RETURN src.id, tx.amount, dst.id ORDER BY tx.amount DESC LIMIT 10
+Question: What is the most fraudulent account and why?
+Extracted: None detected
 
-Results (10 rows) [18ms]:
-  {'src.id': 'C666654362', 'tx.amount': 5460002.91, 'dst.id': 'M1979787155'}
-  ...
+Running agent (generate → execute → [fix →] interpret)...
+
+Cypher [12595ms]:
+MATCH (a:Account) RETURN a.id, a.fraudProb, a.flagVelocity, a.flagMule,
+a.flagDrain, a.pageRank, a.betweenness, a.community ORDER BY a.fraudProb DESC LIMIT 1
+
+Results (1 rows) [171ms]:
+  {'a.id': 'C305956031', 'a.fraudProb': 0.9962, 'a.flagVelocity': False,
+   'a.flagMule': False, 'a.flagDrain': True, 'a.pageRank': 0.15,
+   'a.betweenness': 0.0, 'a.community': 55596}
+
+──────────────────────────────────────────────────
+Answer [8940ms]:
+  Account C305956031 is the most fraudulent, with a GNN fraud probability of
+  0.996 and flagDrain=True — it emptied ≥95% of its balance in a single transfer,
+  a classic smash-and-grab account takeover. Its pageRank of 0.15 marks it as a
+  leaf node (not a coordinator), confirming it was a compromised endpoint used
+  for rapid illicit fund extraction rather than a money mule relay.
+──────────────────────────────────────────────────
+  Total round-trip: 21706ms
   (logged)
 
 Question: quit
-Chat session log saved → /app/logs/chat_2026-05-13_12-52-05.log
 ```
+
+> **Note on LLM timing:** Cypher generation (~12s) and interpretation (~9s) are Ollama Cloud round-trips. In production, a locally-hosted fine-tuned model reduces this to sub-1s.
 
 See [TC-09 — NL Chat](#tc-09--nl-chat-question-types) for a full list of question types to try.
 
@@ -1030,34 +1086,35 @@ Ask a meaningful "why" question that exercises all four agent nodes:
 Question: What is the most fraudulent account and why?
 ```
 
-**Expect full pipeline output:**
+**Real output** (from `logs/chat_2026-05-13_18-57-00.log`):
 ```
 Running agent (generate → execute → [fix →] interpret)...
 
-Cypher [1050ms]:
-MATCH (a:Account)
-RETURN a.id, a.fraudProb, a.flagVelocity, a.flagMule, a.flagDrain,
-       a.pageRank, a.betweenness, a.community
-ORDER BY a.fraudProb DESC LIMIT 1
+Cypher [12595ms]:
+MATCH (a:Account) RETURN a.id, a.fraudProb, a.flagVelocity, a.flagMule,
+a.flagDrain, a.pageRank, a.betweenness, a.community ORDER BY a.fraudProb DESC LIMIT 1
 
-Results (1 rows) [23ms]:
-  {'a.id': 'C...', 'fraudProb': 0.9871, 'flagDrain': True, ...}
+Results (1 rows) [171ms]:
+  {'a.id': 'C305956031', 'a.fraudProb': 0.9962, 'a.flagVelocity': False,
+   'a.flagMule': False, 'a.flagDrain': True, 'a.pageRank': 0.15,
+   'a.betweenness': 0.0, 'a.community': 55596}
 
 ──────────────────────────────────────────────────
-Answer [1398ms]:
-  Account C... is the highest-risk account in the dataset with a GNN score of
-  98.7%. It triggered the drain rule (smash-and-grab — balance emptied ≥95% in
-  one transfer) and sits in Louvain community X alongside Y other flagged accounts.
-  Its elevated PageRank confirms it acted as a central aggregator before the drain.
+Answer [8940ms]:
+  Account C305956031 is the most fraudulent with GNN score 0.996 and flagDrain=True —
+  emptied ≥95% balance in one transfer (smash-and-grab). pageRank 0.15 = leaf node,
+  not a coordinator. Confirmed compromised endpoint for rapid fund extraction.
 ──────────────────────────────────────────────────
+  Total round-trip: 21706ms
   (logged)
 ```
 
 **Verify:**
-- `generate_cypher` returns all relevant fraud signal properties (not just id)
-- `execute_cypher` succeeds first attempt (no fix needed)
+- `generate_cypher` returns all fraud signal properties (not just id)
+- `execute_cypher` succeeds first attempt (no `fix_note`)
 - `interpret_results` produces 2–4 sentence answer with account ID, numeric values, fraud domain language
-- Total round-trip shown in log: `cypher_ms + query_ms + interpret_ms`
+- Log file contains question · entities · Cypher · results · answer · timing breakdown
+- LLM timing (~12s Cypher + ~9s answer) is Ollama Cloud latency — expected for remote inference
 
 ---
 
@@ -1088,10 +1145,11 @@ fraud-graph-demo/
 │   ├── Dockerfile            ← python:3.11-slim + PyTorch CPU + PyG + spaCy
 │   ├── entrypoint.sh         ← auto-ingest on container start
 │   ├── requirements.txt
+│   ├── config.py             ← fast/full presets (GDS params · fraud thresholds · GNN arch · LLM model)
 │   ├── ingest.py             ← PaySim CSV → Neo4j (MERGE, idempotent)
-│   ├── fraud_rules.py        ← 3 Cypher fraud rules (velocity/mule/drain)
-│   ├── gds_analysis.py       ← 5 GDS algorithms + Cypher cycle detection
-│   ├── gnn_train.py          ← GraphSAGE 3-layer · fraudProb → Neo4j
+│   ├── fraud_rules.py        ← 3 Cypher fraud rules (thresholds read from config)
+│   ├── gds_analysis.py       ← 5 GDS algorithms + Cypher cycle detection (params from config)
+│   ├── gnn_train.py          ← GraphSAGE (layers/epochs/threshold from config) · fraudProb → Neo4j
 │   ├── agent.py              ← LangGraph self-healing Cypher agent (generate→execute→fix→interpret)
 │   ├── chat.py               ← spaCy NER + LangChain + Ollama NL→Cypher + session logging
 │   ├── run_all.py            ← full pipeline smoke test (9 checks) + auto-launch chat
@@ -1117,11 +1175,14 @@ fraud-graph-demo/
 | Ollama auth error | Verify `OLLAMA_API_KEY` in `.env` |
 | CSV not found | Check file is in `data/` with exact filename from Kaggle |
 | Out of memory | Reduce `LOAD_LIMIT` in `.env` (default 50000) |
-| Code changes not reflected in container | Image builds from GitHub — push changes, then `docker compose up -d --build` |
+| Code changes not reflected in container | Image builds from GitHub — **push changes first**, then `bash run.sh` |
 | Chat doesn't launch after `run_all.py` | Image is outdated — run `bash run.sh` to rebuild from latest GitHub |
 | Chat questions return empty | GNN questions need `gnn_train.py` to have run first (check `fraudProb IS NOT NULL` count) |
 | `gnn_train.py` — `ModuleNotFoundError: torch_geometric` | Rebuild image: `docker compose up -d --build` |
 | `gnn_train.py` — `GNN fraudProb written: FAIL` | Run `gds_analysis.py` first — GNN needs GDS properties as features |
-| GNN training very slow | Expected on CPU — 150 epochs on 78k nodes takes ~2–3 min. Reduce `EPOCHS` in `gnn_train.py` to 50 for a quick test |
+| GNN training very slow | Use fast preset: `FRAUD_PRESET=fast bash run.sh` (30 epochs vs 150) |
 | `fraudProb` all near 0 or 1 | Re-run after `gds_analysis.py` — if GDS properties are missing, features collapse to flag columns only |
+| Unknown FRAUD_PRESET error | Valid values: `fast`, `full` — check spelling of `FRAUD_PRESET` env var |
+| Fraud rules match 0 accounts | Expected on very small dataset slice — use `FRAUD_PRESET=fast` for looser thresholds |
 | Logs directory empty | Run `docker compose up -d` (not just `up`) to apply volume mount, then rerun pipeline |
+| Log files contain ANSI escape codes | Expected — rich library writes colour codes. Use `cat -v` or a terminal to read; raw text between codes is always present |

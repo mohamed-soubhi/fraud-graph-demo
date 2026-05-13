@@ -21,7 +21,8 @@
 | T-09 | Pipeline + chat logging | ✅ Done |
 | T-10 | Docker WSL fix (GitHub build context) | ✅ Done |
 | T-11 | LangGraph self-healing Cypher agent (Option B) | ✅ Done |
-| T-12 | Demo rehearsal script | ⬜ Todo |
+| T-12 | Config preset system (fast/full) | ✅ Done |
+| T-13 | Demo rehearsal script | ⬜ Todo |
 
 ---
 
