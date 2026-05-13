@@ -10,4 +10,6 @@ RUN pip install https://github.com/explosion/spacy-models/releases/download/en_c
 
 COPY . .
 
-CMD ["tail", "-f", "/dev/null"]
+RUN chmod +x /app/entrypoint.sh
+
+CMD ["/app/entrypoint.sh"]

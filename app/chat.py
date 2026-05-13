@@ -6,9 +6,12 @@ spaCy pre-processing reduces LLM hallucinations by grounding recognized entities
 import os
 import re
 import spacy
+import ollama
+from typing import Any, List, Optional
 from neo4j import GraphDatabase
-from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
+from langchain_core.language_models.llms import LLM
+from langchain_core.callbacks.manager import CallbackManagerForLLMRun
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,6 +22,23 @@ PASSWORD     = os.environ["NEO4J_PASSWORD"]
 OLLAMA_URL   = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2")
 OLLAMA_KEY   = os.environ.get("OLLAMA_API_KEY", "")
+
+
+class OllamaCloudLLM(LLM):
+    model: str
+    base_url: str
+    api_key: str = ""
+
+    @property
+    def _llm_type(self) -> str:
+        return "ollama-cloud"
+
+    def _call(self, prompt: str, stop: Optional[List[str]] = None,
+              run_manager: Optional[CallbackManagerForLLMRun] = None, **kwargs: Any) -> str:
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        client = ollama.Client(host=self.base_url, headers=headers)
+        response = client.generate(model=self.model, prompt=prompt)
+        return response["response"]
 
 TX_TYPES = {"PAYMENT", "TRANSFER", "CASH_OUT", "DEBIT", "CASH_IN"}
 
@@ -107,10 +127,7 @@ def format_entities(entities: dict) -> str:
 
 
 def build_llm():
-    kwargs = {"base_url": OLLAMA_URL, "model": OLLAMA_MODEL}
-    if OLLAMA_KEY:
-        kwargs["headers"] = {"Authorization": f"Bearer {OLLAMA_KEY}"}
-    return OllamaLLM(**kwargs)
+    return OllamaCloudLLM(model=OLLAMA_MODEL, base_url=OLLAMA_URL, api_key=OLLAMA_KEY)
 
 
 def run_cypher(driver, cypher: str):
