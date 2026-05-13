@@ -1,0 +1,8 @@
+neo4j==5.20.0
+pandas==2.2.2
+langchain==0.2.6
+langchain-community==0.2.6
+langchain-ollama==0.1.1
+spacy==3.7.4
+tqdm==4.66.4
+python-dotenv==1.0.1

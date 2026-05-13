@@ -1,0 +1,37 @@
+services:
+  neo4j:
+    image: neo4j:5-community
+    container_name: fraud-neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER}/${NEO4J_PASSWORD}
+      NEO4J_PLUGINS: '["graph-data-science"]'
+      NEO4J_dbms_memory_heap_max__size: 2G
+      NEO4J_dbms_memory_pagecache_size: 1G
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "${NEO4J_USER}", "-p", "${NEO4J_PASSWORD}", "RETURN 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  app:
+    build: ./app
+    container_name: fraud-app
+    env_file: .env
+    volumes:
+      - ./app:/app
+      - ./data:/app/data
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    stdin_open: true
+    tty: true
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
