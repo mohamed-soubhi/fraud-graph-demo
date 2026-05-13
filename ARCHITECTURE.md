@@ -166,33 +166,48 @@ Chat launches automatically after `run_all.py` completes — always, regardless 
 Each session is logged to `logs/chat_YYYY-MM-DD_HH-MM-SS.log` (question · Cypher · results · timing).  
 To quit: type `quit` / `exit` / `q`.
 
+Two LangChain chains run per question — Cypher generator + result interpreter:
+
 ```mermaid
 sequenceDiagram
     participant U as User
     participant CH as chat.py
     participant SP as spaCy NER
-    participant LM as Ollama Cloud\ndeepseek-v4-flash
+    participant LM1 as LLM Call 1\nCypher Generator
     participant DB as Neo4j
+    participant LM2 as LLM Call 2\nResult Interpreter
     participant LOG as logs/chat_*.log
 
-    U->>CH: "Which accounts have fraudProb > 0.8 but no rule flags?"
+    U->>CH: "What is the most fraudulent account and why?"
     CH->>SP: extract entities
-    SP-->>CH: amounts=[], tx_types=[], accounts=[]
-    CH->>LM: schema + entities + question → generate Cypher
-    Note over LM: schema includes fraudProb\n(GNN output) ~1-2s
-    LM-->>CH: MATCH (a:Account) WHERE a.fraudProb > 0.8...
-    CH->>DB: execute Cypher [time shown]
-    DB-->>CH: result rows [time shown]
-    CH->>U: display results + timing
-    CH->>LOG: log question · entities · Cypher · results · round-trip ms
+    SP-->>CH: None detected
+    CH->>LM1: PROMPT(schema + entities + question)
+    Note over LM1: ~1-2s · retries on 503
+    LM1-->>CH: MATCH (a:Account) ORDER BY a.fraudProb DESC LIMIT 1
+    CH->>DB: execute Cypher
+    DB-->>CH: {id: C123, fraudProb: 0.55, flagDrain: true, pageRank: 7.2}
+    CH->>LM2: INTERPRET_PROMPT(question + raw rows)
+    Note over LM2: ~1-2s · explains fraud signals
+    LM2-->>CH: "Account C123 is highest risk — drained balance in single transfer..."
+    CH->>U: raw rows + plain-English answer
+    CH->>LOG: question · Cypher · results · interpretation · all timings
 ```
 
-**Schema exposed to LLM** (enables GNN queries):
+**Two LangChain chains:**
+```python
+chain           = PROMPT | llm           # generates Cypher
+interpret_chain = INTERPRET_PROMPT | llm # explains results in plain English
+```
+
+**Retry logic:** On 503 overloaded — waits 5/10/15s, retries up to 3×. Interpreter failure is non-fatal — raw results still shown.
+
+**Schema exposed to Cypher LLM:**
 ```
 (:Account {id, balance, pageRank, community, wccComponent, betweenness,
            triangleCount, flagVelocity, flagMule, flagDrain, fraudProb})
 ```
-`fraudProb` is a float [0,1] written by `gnn_train.py` — without it in the schema, the LLM cannot generate fraud probability queries.
+
+**Flag initialization:** `fraud_rules.py` sets `flagVelocity=false`, `flagMule=false`, `flagDrain=false` on all accounts before running rules — eliminates null values that break boolean filters.
 
 ---
 

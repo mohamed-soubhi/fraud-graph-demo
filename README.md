@@ -863,6 +863,99 @@ ORDER BY fraudProb DESC LIMIT 15
 
 ---
 
+### TC-16 — Chat: flag initialization (no None values)
+
+After running `fraud_rules.py`, verify all accounts have boolean flags (not null):
+
+```cypher
+MATCH (a:Account)
+WHERE a.flagVelocity IS NULL OR a.flagMule IS NULL OR a.flagDrain IS NULL
+RETURN count(a) AS accounts_with_null_flags
+```
+
+**Expect:** `0` — all accounts have explicit `true`/`false` for every flag. If > 0, re-run `fraud_rules.py`.
+
+---
+
+### TC-17 — Chat: interpreter produces human-readable answer
+
+Run via chat (auto-launches after `run_all.py`):
+
+```
+Question: What is the most fraudulent account and why?
+```
+
+**Expect two-stage output:**
+```
+Cypher [~1000ms]:
+MATCH (a:Account) RETURN a.id, a.fraudProb, a.flagVelocity, ... ORDER BY a.fraudProb DESC LIMIT 1
+
+Results (1 rows) [~50ms]:
+  {'a.id': 'C...', 'fraudProb': 0.xx, 'flagDrain': True, ...}
+
+Interpreting results...
+──────────────────────────────────────────────────
+Answer [~1500ms]:
+  Account C... is the highest-risk account. It was flagged by the drain rule —
+  it emptied its entire balance in a single transfer (smash-and-grab pattern).
+  The GNN assigns it X% fraud probability based on its 3-hop neighbourhood...
+──────────────────────────────────────────────────
+```
+
+**Verify:** Answer is in plain English, references the account ID, explains the fraud signals (flagDrain, fraudProb, pageRank).
+
+---
+
+### TC-18 — Chat: 503 overload retry
+
+Trigger by asking a question when Ollama API is busy (may occur naturally):
+
+**Expect:**
+```
+LLM overloaded — retrying in 5s (attempt 1/3)...
+LLM overloaded — retrying in 10s (attempt 2/3)...
+Cypher [~15000ms]:
+...
+```
+
+Session does **not** crash — retries up to 3×, then logs error and moves to next question.
+
+---
+
+### TC-19 — Chat: interpreter does not crash on empty results
+
+```
+Question: Which accounts have fraudProb > 0.999?
+```
+
+**Expect:**
+```
+Results (0 rows) [Xms]
+No results.
+```
+
+No "Interpreting results..." step — interpreter is skipped when rows are empty. No crash.
+
+---
+
+### TC-20 — Chat: GNN + rules ensemble via NL
+
+```
+Question: Show accounts the GNN flagged as suspicious but rules missed
+```
+
+**Expect Cypher pattern:**
+```cypher
+WHERE a.fraudProb > 0.7
+  AND a.flagVelocity = false
+  AND a.flagMule = false
+  AND a.flagDrain = false
+```
+
+**Verify flags are `false` not `null`** — this query only works correctly after TC-16 passes.
+
+---
+
 ## Stopping and Cleanup
 
 ```bash
