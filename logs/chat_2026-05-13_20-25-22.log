@@ -1,0 +1,25 @@
+============================================================
+FRAUD GRAPH CHAT SESSION
+Started : 2026-05-13T20:25:22.109179
+Model   : deepseek-v4-flash
+Neo4j   : bolt://neo4j:7687
+Log     : /app/logs/chat_2026-05-13_20-25-22.log
+============================================================
+
+[20:31:10] QUESTION
+  what are the persentage of the faurd accounts ?
+
+  Entities  : None detected
+
+  Cypher (10511ms):
+    MATCH (a:Account) WITH COUNT(a) AS total, SUM(CASE WHEN a.fraudProb > 0.5 THEN 1 ELSE 0 END) AS fraudCount RETURN (fraudCount * 100.0 / total) AS percentage
+
+  Results (1 rows) [138ms]:
+    {'percentage': 2.862456846584033}
+
+  Answer (41305ms):
+  The data shows that **2.86%** of all accounts in the graph are classified as fraudulent. This baseline fraud prevalence is significant for fraud detection because it helps set thresholds for alerting and prioritizing investigations—for instance, a GNN score above this rate would warrant deeper scrutiny for potential money mule chains or velocity attacks. The low percentage also suggests that most accounts are legitimate, making it critical to focus on high-confidence signals like flagMule or flagDrain to avoid false positives.
+
+  Total round-trip: 51954ms
+------------------------------------------------------------
+
