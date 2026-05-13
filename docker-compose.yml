@@ -27,6 +27,7 @@ services:
     env_file: .env
     volumes:
       - ./data:/app/data
+      - ./logs:/app/logs
     depends_on:
       neo4j:
         condition: service_healthy
