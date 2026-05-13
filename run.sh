@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
+# NOTE: Docker builds from GitHub master — push any local code changes before running.
+# To use a faster preset: FRAUD_PRESET=fast bash run.sh
 set -e
+
+PRESET="${FRAUD_PRESET:-full}"
+echo "=== Preset: ${PRESET} ==="
 
 echo "=== Stopping and removing existing containers ==="
 docker rm -f fraud-neo4j fraud-app 2>/dev/null || true

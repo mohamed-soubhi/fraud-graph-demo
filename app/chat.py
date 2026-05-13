@@ -16,6 +16,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.language_models.llms import LLM
 from langchain_core.callbacks.manager import CallbackManagerForLLMRun
 from dotenv import load_dotenv
+from config import CFG, PRESET_NAME
 
 load_dotenv()
 
@@ -47,7 +48,7 @@ TX_TYPES = {"PAYMENT", "TRANSFER", "CASH_OUT", "DEBIT", "CASH_IN"}
 
 SCHEMA = """
 Graph schema:
-  (:Account {id, balance, pageRank, community, wccComponent, betweenness, triangleCount,
+  (:Account {id, balance, pageRank, community, wccComponent, betweenness,
              flagVelocity, flagMule, flagDrain, fraudProb})
   (:Transaction {id, amount, type, step, isFraud, isFlagged, flagDrain})
   (:Account)-[:SENT]->(:Transaction)-[:RECEIVED_BY]->(:Account)
@@ -221,22 +222,6 @@ def format_entities(entities: dict) -> str:
 
 
 # ── main loop ────────────────────────────────────────────────────────────────
-
-def _llm_invoke_with_retry(chain, inputs: dict) -> str:
-    """Call chain.invoke with up to 3 retries on 503 overload."""
-    for attempt in range(1, 4):
-        try:
-            return chain.invoke(inputs).strip()
-        except Exception as e:
-            msg = str(e)
-            if "503" in msg or "overloaded" in msg.lower():
-                wait = attempt * 5
-                print(f"  LLM overloaded — retrying in {wait}s (attempt {attempt}/3)...")
-                time.sleep(wait)
-            else:
-                raise
-    raise RuntimeError("LLM unavailable after 3 retries")
-
 
 def chat_loop():
     from agent import build_agent, initial_state

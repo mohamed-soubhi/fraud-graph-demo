@@ -2,6 +2,7 @@
 import os
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
+from config import CFG, PRESET_NAME
 
 load_dotenv()
 
@@ -44,9 +45,9 @@ def project_account_to_account(session):
 def run_louvain(session):
     print("\nRunning Louvain community detection...")
     session.run("""
-        CALL gds.louvain.write($name, { writeProperty: 'community' })
+        CALL gds.louvain.write($name, { writeProperty: 'community', maxLevels: $maxLevels })
         YIELD communityCount, modularity
-    """, name=ACCT_GRAPH)
+    """, name=ACCT_GRAPH, maxLevels=CFG["louvain_max_levels"])
 
     result = session.run("""
         MATCH (a:Account)
@@ -70,11 +71,13 @@ def run_pagerank(session):
     session.run("""
         CALL gds.pageRank.write($name, {
             writeProperty: 'pageRank',
-            maxIterations: 20,
-            dampingFactor: 0.85
+            maxIterations: $maxIter,
+            dampingFactor: $damping
         })
         YIELD nodePropertiesWritten
-    """, name=ACCT_GRAPH)
+    """, name=ACCT_GRAPH,
+         maxIter=CFG["pagerank_max_iterations"],
+         damping=CFG["pagerank_damping"])
 
     result = session.run("""
         MATCH (a:Account)
@@ -120,9 +123,12 @@ def run_wcc(session):
 def run_betweenness(session):
     print("\nRunning Betweenness Centrality (bridge/relay accounts)...")
     session.run("""
-        CALL gds.betweenness.write($name, { writeProperty: 'betweenness' })
+        CALL gds.betweenness.write($name, {
+            writeProperty: 'betweenness',
+            samplingSize: $sampling
+        })
         YIELD centralityDistribution
-    """, name=ACCT_GRAPH)
+    """, name=ACCT_GRAPH, sampling=CFG["betweenness_sampling"])
 
     result = session.run("""
         MATCH (a:Account)
@@ -187,6 +193,10 @@ def run_cycle_detection(session):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    print(f"GDS preset: {PRESET_NAME.upper()}  "
+          f"(pagerank_iter={CFG['pagerank_max_iterations']} "
+          f"betweenness_sampling={CFG['betweenness_sampling']} "
+          f"louvain_levels={CFG['louvain_max_levels']})")
     driver = GraphDatabase.driver(URI, auth=(USER, PASSWORD))
     with driver.session() as session:
         check_gds(session)

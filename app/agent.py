@@ -8,9 +8,9 @@ Graph nodes:
 
 Edges:
   generate_cypher → execute_cypher
-  execute_cypher  → fix_cypher      (if error and retries < MAX_RETRIES)
+  execute_cypher  → fix_cypher      (if error and retries <= MAX_RETRIES)
   execute_cypher  → interpret_results (if success)
-  execute_cypher  → END              (if error and retries >= MAX_RETRIES)
+  execute_cypher  → END              (if error and retries > MAX_RETRIES)
   fix_cypher      → execute_cypher
   interpret_results → END
 """
@@ -20,8 +20,9 @@ from typing_extensions import TypedDict
 
 from langchain_core.prompts import PromptTemplate
 from langgraph.graph import StateGraph, END
+from config import CFG
 
-MAX_RETRIES = 2
+MAX_RETRIES: int = CFG["agent_max_retries"]
 
 
 # ── state ────────────────────────────────────────────────────────────────────
@@ -81,11 +82,18 @@ def build_agent(llm, driver, cypher_chain, interpret_chain, schema: str):
 
     def generate_cypher(state: AgentState) -> AgentState:
         t0 = time.perf_counter()
-        cypher = cypher_chain.invoke({
-            "schema":   schema,
-            "entities": state["entities"],
-            "question": state["question"],
-        }).strip()
+        try:
+            cypher = cypher_chain.invoke({
+                "schema":   schema,
+                "entities": state["entities"],
+                "question": state["question"],
+            }).strip()
+        except Exception as e:
+            return {**state,
+                    "cypher": None,
+                    "cypher_error": f"LLM error during generation: {e}",
+                    "retries": MAX_RETRIES + 1,   # skip straight to END — can't fix without a query
+                    "cypher_ms": state["cypher_ms"] + (time.perf_counter() - t0) * 1000}
         return {**state,
                 "cypher": cypher,
                 "cypher_error": None,

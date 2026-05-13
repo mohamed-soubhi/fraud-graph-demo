@@ -9,3 +9,4 @@ python-dotenv==1.0.1
 scikit-learn==1.5.0
 rich==13.7.1
 langgraph==0.2.76
+ollama>=0.3.0
