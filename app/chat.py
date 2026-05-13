@@ -212,13 +212,42 @@ def chat_loop():
         print(f"\nExtracted: {entity_str}")
 
         print("Generating Cypher...")
-        t0 = time.perf_counter()
-        cypher = chain.invoke({
-            "schema":   SCHEMA,
-            "entities": entity_str,
-            "question": question,
-        }).strip()
-        cypher_ms = (time.perf_counter() - t0) * 1000
+        t0     = time.perf_counter()
+        cypher = None
+        cypher_ms = 0.0
+        llm_error = None
+
+        for attempt in range(1, 4):          # up to 3 retries
+            try:
+                cypher = chain.invoke({
+                    "schema":   SCHEMA,
+                    "entities": entity_str,
+                    "question": question,
+                }).strip()
+                cypher_ms = (time.perf_counter() - t0) * 1000
+                break
+            except Exception as e:
+                msg = str(e)
+                if "503" in msg or "overloaded" in msg.lower():
+                    wait = attempt * 5
+                    print(f"  LLM overloaded — retrying in {wait}s (attempt {attempt}/3)...")
+                    time.sleep(wait)
+                    t0 = time.perf_counter()
+                else:
+                    llm_error = msg
+                    break
+
+        if cypher is None:
+            err = llm_error or "LLM unavailable after 3 retries"
+            print(f"  LLM error: {err}\n")
+            logger.log_interaction(
+                question=question, entities=entity_str,
+                cypher="(none)", cypher_ms=0,
+                rows=None, query_ms=0, error=err,
+            )
+            print("  (logged)\n")
+            continue
+
         print(f"\nCypher [{cypher_ms:.0f}ms]:\n{cypher}\n")
 
         rows      = None
