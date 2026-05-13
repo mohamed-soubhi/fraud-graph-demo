@@ -1,23 +1,43 @@
 # Fraud Graph Demo
 
-Fraud detection knowledge graph using **Neo4j**, **Python**, **GDS**, and **Ollama LLM**.  
-Demonstrates graph engineering + AI integration for the Data Graph Engineer role.
+End-to-end fraud detection knowledge graph demonstrating graph engineering and AI integration.
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Graph DB | Neo4j 5 Community + GDS 2.13 plugin |
+| Graph algorithms | Louvain · PageRank · WCC · Betweenness Centrality · Cycle Detection |
+| Fraud rules | Cypher pattern queries (velocity, mule chain, balance drain) |
+| NL interface | LangChain + spaCy NER + Ollama Cloud (`deepseek-v4-flash`) |
+| Infrastructure | Docker Compose (two containers: neo4j + app) |
+| Language | Python 3.11 |
+| Dataset | PaySim synthetic fraud transactions (Kaggle) |
+
+## Docs
+
+| Document | Description |
+|----------|-------------|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | System design, data model, pipeline diagrams (6 Mermaid charts) |
+| [benchmark_report.md](benchmark_report.md) | GDS algorithm benchmark — timing across 4 graph sizes and 3 config dimensions |
+| [README.md](README.md) | Setup guide + 12 manual test cases |
 
 ---
 
 ## Architecture
 
-```
-PaySim CSV
-    │
-    ▼
-ingest.py ──► Neo4j Graph (Accounts + Transactions)
-                    │
-          ┌─────────┼──────────┐
-          ▼         ▼          ▼
-   fraud_rules  gds_analysis  chat.py
-   (Cypher)     (Louvain/     (LangChain
-                 PageRank)     + Ollama)
+See [ARCHITECTURE.md](ARCHITECTURE.md) for full diagrams. High-level flow:
+
+```mermaid
+flowchart LR
+    CSV["PaySim CSV\n50k txn"] --> ING["ingest.py"]
+    ING --> DB[("Neo4j Graph\n~78k Accounts\n50k Transactions")]
+    DB --> FR["fraud_rules.py\nvelocity · mule · drain"]
+    DB --> GDS["gds_analysis.py\nLouvain · PageRank\nWCC · Betweenness\nCycle Detection"]
+    DB --> CH["chat.py\nspaCy + LangChain\n+ Ollama Cloud"]
+    FR -->|flags| DB
+    GDS -->|properties| DB
+    CH -->|Cypher| DB
 ```
 
 ---
@@ -25,8 +45,8 @@ ingest.py ──► Neo4j Graph (Accounts + Transactions)
 ## Prerequisites
 
 - Docker + Docker Compose
-- PaySim dataset (Kaggle — see T-02 in TASKS.md)
-- Ollama paid API key
+- PaySim dataset (Kaggle — see Step 2 below)
+- Ollama Cloud API key (`OLLAMA_BASE_URL=https://api.ollama.com`)
 
 ---
 
@@ -429,21 +449,26 @@ docker compose down -v
 
 ```
 fraud-graph-demo/
-├── .env.example          ← copy to .env, fill in keys
-├── .gitignore
-├── docker-compose.yml
-├── TASKS.md              ← progress tracker
-├── README.md             ← this file
+├── docker-compose.yml        ← two services: neo4j + app
+├── .env.example              ← copy to .env, fill secrets
+├── README.md                 ← setup guide + test cases
+├── ARCHITECTURE.md           ← system design + Mermaid diagrams
+├── benchmark_report.md       ← auto-generated benchmark results
+├── architecture.drawio       ← draw.io visual diagram
+│
 ├── app/
-│   ├── Dockerfile
+│   ├── Dockerfile            ← python:3.11-slim + spaCy model
+│   ├── entrypoint.sh         ← auto-ingest on container start
 │   ├── requirements.txt
-│   ├── ingest.py         ← T-03: load PaySim → Neo4j
-│   ├── fraud_rules.py    ← T-04: Cypher fraud patterns
-│   ├── gds_analysis.py   ← T-05: GDS Louvain, PageRank, WCC, Betweenness, Cycle Detection
-│   ├── chat.py           ← T-06: LangChain + Ollama NL chat
-│   └── run_all.py        ← T-07: full pipeline runner
+│   ├── ingest.py             ← PaySim CSV → Neo4j (MERGE, idempotent)
+│   ├── fraud_rules.py        ← 3 Cypher fraud rules (velocity/mule/drain)
+│   ├── gds_analysis.py       ← 5 GDS algorithms + Cypher cycle detection
+│   ├── chat.py               ← spaCy NER + LangChain + Ollama NL→Cypher
+│   ├── run_all.py            ← full pipeline smoke test (8 checks)
+│   └── benchmark.py          ← timing benchmark → benchmark_report.md
+│
 └── data/
-    └── *.csv             ← PaySim dataset (gitignored)
+    └── *.csv                 ← PaySim dataset (gitignored)
 ```
 
 ---
