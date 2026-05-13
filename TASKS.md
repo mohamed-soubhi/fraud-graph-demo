@@ -22,7 +22,7 @@
 | T-10 | Docker WSL fix (GitHub build context) | ✅ Done |
 | T-11 | LangGraph self-healing Cypher agent (Option B) | ✅ Done |
 | T-12 | Config preset system (fast/full) | ✅ Done |
-| T-13 | Demo rehearsal script | ⬜ Todo |
+| T-13 | Demo rehearsal script | ✅ Done |
 
 ---
 
@@ -234,8 +234,9 @@ Test cases: TC-21 (self-healing), TC-22 (max retries), TC-23 (full pipeline timi
 
 ---
 
-## T-12 — Demo Rehearsal Script
-**Status:** ⬜ Todo
+## T-13 — Demo Rehearsal Script
+**Status:** ✅ Done  
+**Artifact:** `DEMO.md`
 
 ### Demo flow (5 min)
 1. **(30s)** Open Neo4j Browser → show full graph → "this is 50K PaySim transactions"
